@@ -25,13 +25,10 @@
 </style>
 <div id="root"></div>
 <div id="hud">loading…</div>
-<script type="importmap">
-{ "imports": { "react": "https://esm.sh/react@19" } }
-</script>
 <script type="module">
-import React from 'https://esm.sh/react@19'
-import { createRoot } from 'https://esm.sh/react-dom@19/client'
-import htm from 'https://esm.sh/htm@3.1.1'
+import React from 'react'
+import { createRoot } from 'react-dom/client'
+import htm from 'htm'
 
 const html = htm.bind(React.createElement)
 const params = new URLSearchParams(location.search)
@@ -75,7 +72,7 @@ const MD_MODE = params.get('plain') === '1' ? 'plain'
   : (params.get('md') || (LIST === 'astryx' || SCENARIO === 'rest' || SCENARIO === 'reflow' || SCENARIO === 'scrollup' ? 'astryx' : 'marked'))
 
 const { useVirtualizer } = await import(
-  `https://esm.sh/@tanstack/react-virtual@${RV_VER}?deps=react@19,react-dom@19`
+  '@tanstack/react-virtual'
 )
 
 let Streamdown = null
@@ -91,24 +88,24 @@ if (MD_MODE === 'streamdown') {
     console.warn('[repro] streamdown failed to load; falling back to plain', e)
   }
 } else if (MD_MODE === 'marked') {
-  ;({ marked } = await import('https://esm.sh/marked'))
+  ;({ marked } = await import('marked'))
 } else if (MD_MODE === 'astryx') {
   document.body.classList.add('light')
   if (params.get('cv') === '1') document.body.classList.add('cv')
   for (const href of [
-    'https://unpkg.com/@astryxdesign/core@0.1.6/src/reset.css',
-    'https://unpkg.com/@astryxdesign/core@0.1.6/dist/astryx.css',
-    'https://unpkg.com/@astryxdesign/theme-neutral@0.1.6/dist/theme.css',
-    'https://unpkg.com/@astryxdesign/core@0.1.6/src/tailwind-theme.css',
+    '/node_modules/@astryxdesign/core/src/reset.css',
+    '/node_modules/@astryxdesign/core/dist/astryx.css',
+    '/node_modules/@astryxdesign/theme-neutral/dist/theme.css',
+    '/node_modules/@astryxdesign/core/src/tailwind-theme.css',
   ]) {
     const l = document.createElement('link')
     l.rel = 'stylesheet'; l.href = href
     document.head.appendChild(l)
   }
   const [md, th, nt] = await Promise.all([
-    import('https://esm.sh/@astryxdesign/core@0.1.6/Markdown?deps=react@19,react-dom@19'),
-    import('https://esm.sh/@astryxdesign/core@0.1.6/theme?deps=react@19,react-dom@19'),
-    import('https://esm.sh/@astryxdesign/theme-neutral@0.1.6/built?deps=react@19,react-dom@19'),
+    import('@astryxdesign/core/Markdown'),
+    import('@astryxdesign/core/theme'),
+    import('@astryxdesign/theme-neutral/built'),
   ])
   AstryxMarkdown = md.Markdown
   AstryxTheme = th.Theme
@@ -117,7 +114,7 @@ if (MD_MODE === 'streamdown') {
 
 let Chat = null
 if (LIST === 'astryx' || MIX === 'real' || MIX === 'wild') {
-  Chat = await import('https://esm.sh/@astryxdesign/core@0.1.6/Chat?deps=react@19,react-dom@19')
+  Chat = await import('@astryxdesign/core/Chat')
 }
 
 // ?lv=3.3.7 pins @legendapp/list for the legend arm
@@ -125,7 +122,7 @@ let LegendList = null
 if (LIST === 'legend') {
   const LV = params.get('lv') || '3.3.7'
   ;({ LegendList } = await import(
-    `https://esm.sh/@legendapp/list@${LV}/react?deps=react@19,react-dom@19`
+    '@legendapp/list/react'
   ))
 }
 
@@ -142,7 +139,7 @@ if (LIST === 'proto') {
 let Virtua = null
 if (LIST === 'virtua') {
   const VV = params.get('vv') || '0.50.4'
-  Virtua = await import(`https://esm.sh/virtua@${VV}?deps=react@19,react-dom@19`)
+  Virtua = await import('virtua')
 }
 
 // ?mv=1.17.1 pins @virtuoso.dev/message-list for the virtuoso arm
@@ -150,7 +147,7 @@ let Virtuoso = null
 if (LIST === 'virtuoso') {
   const MV = params.get('mv') || '1.17.1'
   Virtuoso = await import(
-    `https://esm.sh/@virtuoso.dev/message-list@${MV}?deps=react@19,react-dom@19`
+    '@virtuoso.dev/message-list'
   )
 }
 

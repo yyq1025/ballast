@@ -73,9 +73,12 @@ The hand-feel metrics (churn ratio, entering-region pop rate, pop persistence) a
 ## Running the harness
 
 ```bash
-node harness/server.mjs
+bun install
+bun run harness
 # open http://localhost:5490/harness/index.html?list=proto&scenario=scrollup&mix=real&size=1000
 ```
+
+The harness is a Vite dev server (port 5490, cross-origin-isolated so the memory scenario can call `measureUserAgentSpecificMemory`). All benchmark deps resolve locally through Vite's pre-bundling — after install, runs make zero network requests (esm.sh cold-fetch races produced ghost runs before this; see `docs/RESULTS.md`). The page still imports `src/index.mjs` directly, so the receipts always describe the shipped code.
 
 Bench runners need a Chrome with `--remote-debugging-port=9222` (frame-accurate measurement does not work in embedded panes):
 
