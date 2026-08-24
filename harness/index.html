@@ -1587,8 +1587,16 @@ function ChatLayoutApp() {
   const streaming = React.useRef(false)
   const [isStreaming, setIsStreaming] = React.useState(false)
 
-  // send -> append the prompt, then stream a reply in chunk by chunk.
-  const send = React.useCallback(() => {
+  const timerRef = React.useRef(null)
+  const stop = React.useCallback(() => {
+    if (timerRef.current) clearInterval(timerRef.current)
+    timerRef.current = null
+    streaming.current = false
+    setIsStreaming(false)
+  }, [])
+
+  // send -> append the typed prompt, then stream a reply chunk by chunk.
+  const send = React.useCallback((prompt) => {
     if (streaming.current) return
     streaming.current = true
     setIsStreaming(true)
@@ -1598,11 +1606,11 @@ function ChatLayoutApp() {
     // that differs is how many messages are already in the list.
     setMessages((prev) => [
       ...prev,
-      { id: `u-${prev.length}`, sender: 'user', text: 'Summarize the deployment failures from the last hour.' },
+      { id: `u-${prev.length}`, sender: 'user', text: prompt || 'Summarize the deployment failures from the last hour.' },
       { id: `a-${prev.length}`, sender: 'assistant', text: '' },
     ])
     let charIdx = 0
-    const timer = setInterval(() => {
+    timerRef.current = setInterval(() => {
       charIdx += 2 + Math.floor(Math.random() * 4)
       setMessages((prev) => {
         const next = prev.slice()
@@ -1610,31 +1618,38 @@ function ChatLayoutApp() {
         next[next.length - 1] = { ...last, text: STREAM_TEXT.slice(0, charIdx) }
         return next
       })
-      if (charIdx >= STREAM_TEXT.length) {
-        clearInterval(timer)
-        streaming.current = false
-        setIsStreaming(false)
-      }
+      if (charIdx >= STREAM_TEXT.length) stop()
     }, RATE)
     setTimeout(() => {
-      clearInterval(timer)
-      stats.done = true
-      console.log('[repro] FINAL', JSON.stringify(summarize()))
+      if (!stats.done) {
+        stats.done = true
+        console.log('[repro] FINAL', JSON.stringify(summarize()))
+      }
     }, DUR)
-  }, [])
+  }, [stop])
 
   // Drive one send automatically so scripted runners measure the same path a
   // user would take by hand.
   React.useEffect(() => {
-    const t = setTimeout(send, 2500)
+    const t = setTimeout(() => send(''), 2500)
     return () => clearTimeout(t)
   }, [send])
 
   useStreamMeasurement()
 
-  const composer = html`<${Chat.ChatComposer}>
+  // The idiomatic wiring: ChatComposer owns input state and calls onSubmit
+  // with the typed value; ChatSendButton reads canSend/onSubmit from the
+  // composer context (it is DISABLED on empty input — a bare onClick prop is
+  // silently ignored, its prop is onSend), and doubles as the STOP button
+  // while a reply streams.
+  // sendButton is a PROP of ChatComposer, not a child — a ChatSendButton
+  // passed as a child is discarded and the composer renders its own default
+  // (verified by fiber walk: the mounted button had empty props).
+  const composer = html`<${Chat.ChatComposer}
+    onSubmit=${(value) => send(value)}
+    sendButton=${html`<${Chat.ChatSendButton} isStopShown=${isStreaming} onStop=${stop} />`}
+  >
     <${Chat.ChatComposerInput} placeholder="Message" />
-    <${Chat.ChatSendButton} onClick=${send} />
   <//>`
 
   // ChatLayout scrolls the PAGE by default (its root has overflow visible and

@@ -48,7 +48,14 @@ export function Ballast(props) {
     // the scroller and the virtualizer is one participant in it. Pass the
     // ELEMENT, not a ref: a parent's ref attaches after its children's layout
     // effects, so a ref would still read null on the commit that matters,
-    // while state holding the element re-renders with it available.
+    // while state holding the element re-renders with it available. Pass
+    // null (not undefined) while the element is pending: absent = own-
+    // container mode, null = attach mode waiting — falling back to the own
+    // container for even one commit inside a parent that doesn't bound its
+    // height lets clientHeight equal the content height, the window covers
+    // every row, and the next commit tears the full tree back down
+    // (measured: 2000 astryx messages mounted + removed, 10s of boot spent
+    // in removeChild and astryx context reads).
     scrollElement,
     // How close to the bottom (px) a user scroll must land to re-engage
     // follow-at-end. This is the RE-ENGAGE condition only — disengaging is
@@ -66,8 +73,12 @@ export function Ballast(props) {
   } = props
 
   const ownScrollerRef = React.useRef(null)
+  const attachMode = scrollElement !== undefined
   // Single accessor so every pass reads the live element in either mode.
-  const getScroller = () => scrollElement ?? ownScrollerRef.current
+  // In attach mode a pending (null) element makes every pass bail rather
+  // than falling back to the own container.
+  const getScroller = () =>
+    attachMode ? scrollElement : ownScrollerRef.current
   const spacerTopRef = React.useRef(null)
   const spacerBottomRef = React.useRef(null)
   const rowEls = React.useRef(new Map()) // key -> element
@@ -518,7 +529,7 @@ export function Ballast(props) {
     h('div', { key: '__bottom', ref: spacerBottomRef, 'aria-hidden': true }),
   )
 
-  if (scrollElement) return h(React.Fragment, null, children)
+  if (attachMode) return h(React.Fragment, null, children)
 
   return h(
     'div',
