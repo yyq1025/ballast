@@ -592,36 +592,6 @@ export function Ballast(props) {
   const onScrollRef = React.useRef(onScroll)
   onScrollRef.current = onScroll
 
-  // Toward-the-end wheel intent (the ChatGPT transcript's accumulator,
-  // minimally ported): while reading history, a user wheeling down races the
-  // streaming tail — every fence close grows the distance faster than a
-  // 120px wheel click closes it, so the bottom keeps receding and arrival
-  // feels like being bounced back (user-reported on wheel AND trackpad).
-  // Track the gesture in INTENT space instead: snapshot the distance when a
-  // downward run starts, subtract every downward delta, and when the user
-  // has wheeled the whole way — regardless of how much the content grew
-  // underneath — engage follow. Upward deltas or a 1s pause reset the run.
-  const towardRef = React.useRef({ remaining: null, lastT: 0 })
-  const noteWheelToward = (e, el) => {
-    if (mode.current.kind !== 'anchor' || converging.current) return
-    const now = performance.now()
-    const t = towardRef.current
-    const px =
-      e.deltaMode === 1 ? e.deltaY * 16 : e.deltaMode === 2 ? e.deltaY * el.clientHeight : e.deltaY
-    if (px <= 0) {
-      t.remaining = null
-      return
-    }
-    if (t.remaining === null || now - t.lastT > 1000)
-      t.remaining = el.scrollHeight - el.clientHeight - el.scrollTop
-    t.remaining -= px
-    t.lastT = now
-    if (t.remaining <= endThresholdRef.current) {
-      t.remaining = null
-      declare({ kind: 'end', distance: 0 })
-    }
-  }
-
   // Listeners are attached imperatively rather than through JSX so both modes
   // take the same path, and so attach mode can also turn OFF the browser's own
   // scroll anchoring on a container it does not render: native anchoring picks
@@ -632,9 +602,33 @@ export function Ballast(props) {
     if (!el) return
     // Intent signals break convergence early: wheel/touchstart are USER INPUT,
     // unlike scroll events (which mix in our own writes and clamps).
+    //
+    // Wheel-up additionally unpins follow IMMEDIATELY (the Rocksteady
+    // semantic), because the scroll-event path cannot be trusted for this
+    // during a stream: a follow write can land between the browser moving
+    // scrollTop and our handler reading it, so the user's own upward
+    // movement reads back as our echo and the disengage is swallowed
+    // (measured: a scroll-up during an active stream stayed pinned, the
+    // viewport snapped straight back to the bottom). Acting on the wheel
+    // event itself needs no scrollTop read, so there is no window to race.
+    // Re-engaging stays position-based — dist <= endThreshold at a user
+    // scroll event — with the scroll-to-bottom button as the declarative
+    // path back mid-stream. (An intent-space wheel accumulator, ChatGPT-
+    // style, was tried and removed: with honest running-average estimates
+    // the receding-bottom race it compensated for no longer reproduces.)
     const cancel = (e) => {
       converging.current = false
-      if (e.type === 'wheel') noteWheelToward(e, el)
+      if (
+        e.type === 'wheel' &&
+        e.deltaY < 0 &&
+        mode.current.kind === 'end' &&
+        el.scrollTop > 0
+      ) {
+        mode.current = anchorAt(el.scrollTop)
+        userAway.current = 0
+        userScrolledRef.current = true
+        lastUserEventT.current = performance.now()
+      }
     }
     const prevAnchor = el.style.overflowAnchor
     el.style.overflowAnchor = 'none'
