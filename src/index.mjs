@@ -149,6 +149,9 @@ export function Ballast(props) {
   // shifts every offset while the restore skips its write (measured: a
   // declared anchor deterministically 44px off).
   const GLOBAL_BUCKET = '\u0000global'
+  // Prior strength for shrinkage in effectiveAvg: at this many real samples
+  // the bucket's own data and the inherited baseline carry equal weight.
+  const PRIOR_SAMPLES = 5
   const bucketsRef = React.useRef(new Map())
   const typeByKey = React.useRef(new Map())
   const bucket = (t) => {
@@ -175,11 +178,15 @@ export function Ballast(props) {
   // repricing event in its own right.)
   const effectiveAvg = (t, baseline) => {
     const b = bucketsRef.current.get(t)
-    // Below 5 samples a bucket's raw mean is noise (one tall outlier moves
-    // it 10%+ per sample, and every crossing is a mass repricing): stay on
-    // the inherited baseline until the mean has some mass behind it.
-    if (!b || b.count < 5) return baseline
-    const raw = b.sum / b.count
+    if (!b || b.count === 0) return baseline
+    // Shrinkage toward the inherited baseline: the baseline counts as
+    // PRIOR_SAMPLES virtual samples, so a young bucket's mean is mostly
+    // baseline (1 real sample = 1/(1+K) weight) and the data takes over
+    // smoothly as samples accumulate. Replaces a hard min-count gate —
+    // same protection against single-sample noise, no cliff at the
+    // threshold crossing.
+    const raw =
+      (b.sum + PRIOR_SAMPLES * baseline) / (b.count + PRIOR_SAMPLES)
     if (b.eff === 0) b.eff = baseline > 0 ? baseline : raw
     if (
       !converging.current &&
