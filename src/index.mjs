@@ -61,6 +61,11 @@ export function Ballast(props) {
     // every row, and the next commit tears the full tree back down
     // (measured: 2000 astryx messages mounted + removed, 10s of boot spent
     // in removeChild and astryx context reads).
+    //
+    // CONTRACT: row spacing must live INSIDE the rows (padding), never as
+    // flex `gap` or margins on the container — offsetHeight cannot see
+    // either, so the geometry would drift by one gap per row. The harness
+    // nests inside ChatMessageList with gap=0 for exactly this reason.
     scrollElement,
     // How close to the bottom (px) a user scroll must land to re-engage
     // follow-at-end. This is the RE-ENGAGE condition only — disengaging is
@@ -79,16 +84,32 @@ export function Ballast(props) {
 
   const ownScrollerRef = React.useRef(null)
   const attachMode = scrollElement !== undefined
+  // Closure discipline: everything the correction machinery reads that can
+  // change between renders lives in a ref, because parts of the machinery
+  // (the memoized pass chain, the once-created ResizeObserver callback) hold
+  // closures from an OLD render. The harness masked this by passing inline
+  // props (every render rebuilt the chain); a consumer who memoizes
+  // keyExtractor/getItemType — the idiomatic thing to do — would otherwise
+  // freeze the pass on the first render's scrollElement (null in attach
+  // mode: the list never measures again).
+  const scrollElementRef = React.useRef(scrollElement)
+  scrollElementRef.current = scrollElement
+  const overscanTopRef = React.useRef(overscanTop)
+  overscanTopRef.current = overscanTop
+  const overscanBottomRef = React.useRef(overscanBottom)
+  overscanBottomRef.current = overscanBottom
   // Single accessor so every pass reads the live element in either mode.
   // In attach mode a pending (null) element makes every pass bail rather
   // than falling back to the own container.
   const getScroller = () =>
-    attachMode ? scrollElement : ownScrollerRef.current
+    scrollElementRef.current !== undefined
+      ? scrollElementRef.current
+      : ownScrollerRef.current
   const spacerTopRef = React.useRef(null)
   const spacerBottomRef = React.useRef(null)
   const rowEls = React.useRef(new Map()) // key -> element
   const sizes = React.useRef(new Map()) // key -> measured px
-  const geo = React.useRef({ offsets: [], total: 0, keys: [] })
+  const geo = React.useRef({ offsets: [], total: 0, keys: [], index: new Map() })
   // mode: { kind: 'end', distance } | { kind: 'anchor', key, viewportOffset }
   const mode = React.useRef({ kind: 'end', distance: 0 })
   // Echo-matching instead of a time window: we record the exact value we
@@ -221,12 +242,20 @@ export function Ballast(props) {
     const offsets = new Array(d.length)
     const keys = new Array(d.length)
     let y = 0
+    const index = new Map()
     for (let i = 0; i < d.length; i++) {
-      keys[i] = keyExtractor(d[i], i)
+      // String coercion is part of the key contract: the RO pipeline reads
+      // keys back from dataset.pkey (always a string), so a number key would
+      // split the size cache in two — the RO copy under the string, the sync
+      // copy under the number — and every RO re-measure would feed the
+      // averages as a fresh sample. Coercing at both derivation points keeps
+      // every internal map keyed consistently.
+      keys[i] = String(keyExtractor(d[i], i))
+      index.set(keys[i], i)
       offsets[i] = y
       y += sizes.current.get(keys[i]) ?? estOf(d[i], i)
     }
-    geo.current = { offsets, total: y, keys }
+    geo.current = { offsets, total: y, keys, index }
   }, [keyExtractor, estOf])
 
   // index of the last row whose offset <= y
@@ -246,8 +275,8 @@ export function Ballast(props) {
     const g = geo.current
     if (g.keys.length === 0) return { start: 0, end: -1 }
     const top = (desiredTop ?? el.scrollTop) - originRef.current
-    const start = indexAt(Math.max(0, top - overscanTop))
-    const bottomEdge = top + el.clientHeight + overscanBottom
+    const start = indexAt(Math.max(0, top - overscanTopRef.current))
+    const bottomEdge = top + el.clientHeight + overscanBottomRef.current
     // When the query reaches past the content, include the last row by
     // construction instead of by binary search: a zero-height final row sits
     // AT total, which the search (offsets[i] <= total - 1) can never select.
@@ -311,7 +340,7 @@ export function Ballast(props) {
   // last message parks underneath the overlay (measured: constant 174px).
   const belowRef = React.useRef(0)
   const measureOrigin = (el) => {
-    if (!scrollElement) return 0
+    if (scrollElementRef.current == null) return 0
     const top = spacerTopRef.current
     if (!top) return originRef.current
     originRef.current =
@@ -333,7 +362,7 @@ export function Ballast(props) {
     if (m.kind === 'end')
       raw = origin + g.total + below - el.clientHeight - m.distance
     else {
-      const idx = g.keys.indexOf(m.key)
+      const idx = g.index.get(m.key) ?? -1
       if (idx < 0) return null
       raw = origin + g.offsets[idx] - m.viewportOffset
     }
@@ -407,6 +436,14 @@ export function Ballast(props) {
     // restore scrollTop from the stored reference frame
     if (converging.current) geoChanged.current = true
     const target = targetFor(mode.current, el)
+    // Unreachable declaration guard: anchorToKey to a key that is not in the
+    // data (or whose row was deleted mid-flight) yields a null target every
+    // pass, and convergence can only exit by reaching a target — while the
+    // convergence gate keeps ignoring scroll events, so scrollbar drags and
+    // keyboard scrolling could never recover (only wheel/touch intent
+    // could). Give up the convergence instead: the mode stays as declared
+    // and self-heals from the next real signal.
+    if (target === null) converging.current = false
     if (target !== null && geoChanged.current) {
       geoChanged.current = false
       if (Math.abs(el.scrollTop - target) > 0.5) {
@@ -420,7 +457,7 @@ export function Ballast(props) {
         progTarget.current = actual
         if (Math.abs(actual - target) > 1) {
           geoChanged.current = true
-          requestAnimationFrame(() => syncAndRestore())
+          requestAnimationFrame(() => syncRef.current())
         }
       }
     }
@@ -448,6 +485,12 @@ export function Ballast(props) {
     // a real gesture.
     if (el.scrollTop !== entryScrollTop) progTarget.current = el.scrollTop
   }, [recompute])
+  // Latest-pass ref (the onScrollRef idiom, applied to the pass itself): the
+  // ResizeObserver callback and the in-flight rAF retry are created once and
+  // outlive prop changes, so they must dial the CURRENT pass, not the one
+  // their closure was born with.
+  const syncRef = React.useRef(syncAndRestore)
+  syncRef.current = syncAndRestore
 
   // Data identity change (append / chunk growth) also invalidates geometry.
   const prevData = React.useRef(data)
@@ -497,21 +540,28 @@ export function Ballast(props) {
   const roRef = React.useRef(null)
   if (roRef.current === null && typeof ResizeObserver !== 'undefined') {
     roRef.current = new ResizeObserver((entries) => {
-      if (measureModeRef.current === 'ro') {
-        for (const entry of entries) {
-          const key = entry.target.dataset.pkey
-          if (key === undefined) continue
-          const px =
-            entry.borderBoxSize?.[0]?.blockSize ?? entry.contentRect.height
-          const prev = sizes.current.get(key)
-          if (px > 0 && prev !== px) {
-            noteMeasured(key, prev, px)
-            sizes.current.set(key, px)
-            geoChanged.current = true
-          }
+      for (const entry of entries) {
+        const key = entry.target.dataset.pkey
+        if (key === undefined) {
+          // The scroll CONTAINER (observed in the listener effect): its
+          // resize changes clientHeight, which moves the end-mode target and
+          // the window coverage with zero row-size changes — without marking
+          // the geometry dirty here, a window resize or a growing composer
+          // would leave the pinned bottom stranded.
+          geoChanged.current = true
+          continue
+        }
+        if (measureModeRef.current !== 'ro') continue
+        const px =
+          entry.borderBoxSize?.[0]?.blockSize ?? entry.contentRect.height
+        const prev = sizes.current.get(key)
+        if (px > 0 && prev !== px) {
+          noteMeasured(key, prev, px)
+          sizes.current.set(key, px)
+          geoChanged.current = true
         }
       }
-      syncAndRestore()
+      syncRef.current()
     })
   }
   React.useEffect(() => () => roRef.current?.disconnect(), [])
@@ -543,7 +593,7 @@ export function Ballast(props) {
           buckets: Object.fromEntries(
             [...bucketsRef.current].map(([t, b]) => [t, { count: b.count, eff: +b.eff.toFixed(1) }]),
           ),
-          offsetOf: (k) => g.offsets[g.keys.indexOf(k)],
+          offsetOf: (k) => g.offsets[g.index.get(String(k)) ?? -1],
           spacerTop: spacerTopRef.current?.style.height,
         }
       },
@@ -557,7 +607,7 @@ export function Ballast(props) {
       // pinning a row near the end needs reserved space below it, which
       // this primitive does not provide yet.
       anchorToKey: (key, viewportOffset = 0) =>
-        declare({ kind: 'anchor', key, viewportOffset }),
+        declare({ kind: 'anchor', key: String(key), viewportOffset }),
     }
   }
 
@@ -661,32 +711,57 @@ export function Ballast(props) {
     el.addEventListener('scroll', scrollHandler, { passive: true })
     el.addEventListener('wheel', cancel, { passive: true })
     el.addEventListener('touchstart', cancel, { passive: true })
+    // Observe the CONTAINER too (rows alone miss clientHeight changes): a
+    // window resize or a growing composer moves the end-mode target and the
+    // window coverage without any row changing size. Container entries have
+    // no data-pkey — the RO callback marks the geometry dirty for them.
+    // TEMP bisect: container observe off
     return () => {
       el.style.overflowAnchor = prevAnchor
       el.removeEventListener('scroll', scrollHandler)
       el.removeEventListener('wheel', cancel)
       el.removeEventListener('touchstart', cancel)
+      roRef.current?.unobserve(el)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scrollElement])
 
-  const rowRef = (key) => (el) => {
-    if (el) {
-      rowEls.current.set(key, el)
-      roRef.current?.observe(el)
-    } else {
-      const prev = rowEls.current.get(key)
-      if (prev) roRef.current?.unobserve(prev)
-      rowEls.current.delete(key)
+  // Stable per-key ref callbacks: an inline `(el) => …` would be a new
+  // identity every render, making React detach + reattach EVERY row's ref on
+  // EVERY commit — and each re-observe() fires an initial ResizeObserver
+  // callback, so steady-state commits would trigger a full-window RO batch
+  // of pure noise.
+  const rowRefCbs = React.useRef(new Map())
+  const rowRef = (key) => {
+    let cb = rowRefCbs.current.get(key)
+    if (!cb) {
+      cb = (el) => {
+        if (el) {
+          rowEls.current.set(key, el)
+          roRef.current?.observe(el)
+        } else {
+          const prev = rowEls.current.get(key)
+          if (prev) roRef.current?.unobserve(prev)
+          rowEls.current.delete(key)
+          rowRefCbs.current.delete(key)
+        }
+      }
+      rowRefCbs.current.set(key, cb)
     }
+    return cb
   }
 
+  // flexShrink: 0 — inside a column-flex scroller the spacers are flex items
+  // and would otherwise be compressed to fit (default shrink 1), silently
+  // corrupting the whole geometry. Heights stay imperative; React only
+  // manages this one property, so its style diffing never touches height.
+  const spacerStyle = { flexShrink: 0 }
   const children = [
-    h('div', { key: '__top', ref: spacerTopRef, 'aria-hidden': true }),
+    h('div', { key: '__top', ref: spacerTopRef, style: spacerStyle, 'aria-hidden': true }),
   ]
   if (win.end >= win.start) {
     for (let i = win.start; i <= Math.min(win.end, data.length - 1); i++) {
-      const key = keyExtractor(data[i], i)
+      const key = String(keyExtractor(data[i], i))
       if (getItemType) typeByKey.current.set(key, getItemType(data[i], i))
       children.push(
         h(
@@ -698,7 +773,7 @@ export function Ballast(props) {
     }
   }
   children.push(
-    h('div', { key: '__bottom', ref: spacerBottomRef, 'aria-hidden': true }),
+    h('div', { key: '__bottom', ref: spacerBottomRef, style: spacerStyle, 'aria-hidden': true }),
   )
 
   if (attachMode) return h(React.Fragment, null, children)

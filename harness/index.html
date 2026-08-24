@@ -1534,6 +1534,15 @@ const VIRT = params.get('virt') === '1'
 // virtualizer ATTACHES to it through the layout's own published context
 // (useChatLayoutContext -> scrollContainerRef). Rows render into the layout's
 // content region as a bare fragment, so nothing nests a second scroller.
+// ?memo=1 passes STABLE references for every function prop — the idiomatic
+// memoized consumer. This is the regression arm for the stale-closure class:
+// with inline props every render rebuilds the pass chain and masks it; with
+// stable props the memoized chain must read live refs or attach mode never
+// sees the scroller arrive.
+const memoKeyExtractor = (m) => m.id
+const memoRenderItem = ({ item }) => renderChatRow(item)
+const memoGetItemType = (m) => m.sender
+
 function VirtualizedMessages({ messages, apiRef, scrollElRef, isStreaming }) {
   const ctx = Chat.useChatLayoutContext()
   const [scrollEl, setScrollEl] = React.useState(null)
@@ -1553,10 +1562,10 @@ function VirtualizedMessages({ messages, apiRef, scrollElRef, isStreaming }) {
       apiRef=${apiRef}
       measureMode=${params.get('measure') || 'ro'}
       data=${messages}
-      keyExtractor=${(m) => m.id}
-      renderItem=${({ item }) => renderChatRow(item)}
+      keyExtractor=${params.get('memo') === '1' ? memoKeyExtractor : (m) => m.id}
+      renderItem=${params.get('memo') === '1' ? memoRenderItem : ({ item }) => renderChatRow(item)}
       estimatedItemSize=${120}
-      getItemType=${(m) => m.sender}
+      getItemType=${params.get('memo') === '1' ? memoGetItemType : (m) => m.sender}
     />
   <//>`
 }
