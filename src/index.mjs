@@ -91,6 +91,15 @@ export function Ballast(props) {
   // A time gate would swallow real user scrolls arriving within the window,
   // leaving a stale anchor that the next restore then fights (double-writer).
   const progTarget = React.useRef(null)
+  // Which regime scrollTop is in: USER-DRIVEN (a non-echo scroll event was
+  // the latest movement — the live-anchor refresh may re-derive identity
+  // from scrollTop every pass, covering the events-lag-rAF staleness) or
+  // MACHINE-DRIVEN (a declaration was issued and the user has not scrolled
+  // since — the stored identity is the truth and refresh must hold off).
+  // A regime, not a one-shot: at high scroll speeds several correction
+  // passes run between two scroll events, and clearing per pass re-created
+  // the staleness class mid-gesture (measured: 5.2% at step=60).
+  const userScrolledRef = React.useRef(false)
   // Last scrollTop observed by a scroll event, and the px the user has moved
   // away from where the machinery last placed them — the end→anchor decision
   // runs on the latter (see onScroll).
@@ -111,11 +120,51 @@ export function Ballast(props) {
   const dataRef = React.useRef(data)
   dataRef.current = data
 
+  // Running average of everything measured so far. A static estimate that
+  // undershoots makes the bottom RECEDE while scrolling toward it: each cold
+  // row that mounts adds (real - est) px of newly discovered distance, and a
+  // mouse wheel at ~120px/click cannot outrun a 158px/row discovery rate —
+  // measured as "wheel cannot reach the bottom; trackpad (faster) can".
+  // Once samples exist they price unmeasured rows, so mounting a cold row
+  // discovers ~nothing. An estimatedItemSize FUNCTION is authoritative and
+  // never overridden (the consumer knows more than an average does).
+  // The raw average accumulates continuously, but the EFFECTIVE price moves
+  // with hysteresis (>5% relative change) and never while converging: every
+  // effective-average change reprices every unmeasured row at once, so a
+  // freely-tracking average makes anchor targets chase a moving sum during
+  // landings (measured: declared jumps 200px off after 20 frames) and adds
+  // repricing jumps under fast scroll (measured: 1.1% at step=60).
+  const avgRef = React.useRef({ sum: 0, count: 0, eff: 0 })
+  const noteMeasured = (prev, px) => {
+    const a = avgRef.current
+    if (prev === undefined) {
+      a.sum += px
+      a.count += 1
+    } else a.sum += px - prev
+  }
+  const effectiveAvg = () => {
+    const a = avgRef.current
+    if (a.count === 0) return 0
+    const raw = a.sum / a.count
+    if (a.eff === 0) a.eff = raw
+    else if (!converging.current && Math.abs(raw - a.eff) > a.eff * 0.05) {
+      a.eff = raw
+      // Repricing every unmeasured row IS a geometry change: without this
+      // flag the recompute shifts all offsets, the spacers follow, but the
+      // restore skips its write and scrollTop is left priced under the old
+      // average (measured: a declared anchor deterministically 44px off).
+      geoChanged.current = true
+    }
+    return a.eff
+  }
   const estOf = React.useCallback(
-    (item, i) =>
-      typeof estimatedItemSize === 'function'
-        ? estimatedItemSize(item, i)
-        : estimatedItemSize,
+    (item, i) => {
+      if (typeof estimatedItemSize === 'function')
+        return estimatedItemSize(item, i)
+      const eff = effectiveAvg()
+      return eff > 0 ? eff : estimatedItemSize
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     [estimatedItemSize],
   )
 
@@ -257,10 +306,15 @@ export function Ballast(props) {
     // anchor here removes that staleness class entirely.
     if (
       mode.current.kind === 'anchor' &&
-      // ...but NOT while converging: then the anchor is a DECLARATION (an
-      // imperative anchorToKey), and re-deriving it from the live scrollTop
-      // would immediately overwrite the destination with wherever we happen
-      // to be standing — the same protection end-mode targets already get.
+      // Re-derive the anchor from the live scrollTop ONLY when scrollTop's
+      // latest movement was user-authored. That is the staleness this refresh
+      // exists for (scroll events lag rAF scrolls by a frame; 11.3% before).
+      // When the machinery moved last — a declared anchorToKey landing, a
+      // restore, an average repricing — the stored identity is the truth and
+      // scrollTop may be mid-correction: re-deriving from it replaced a
+      // declared {key, 0} with the neighbouring row at the repricing delta
+      // (measured: deterministic 44px landing error).
+      userScrolledRef.current &&
       !converging.current &&
       geo.current.keys.length > 0
     ) {
@@ -285,7 +339,9 @@ export function Ballast(props) {
       // the streamed reply never rendered at all. Keeping the estimate keeps
       // the row reachable until it has real height.
       if (px === 0) continue
-      if (sizes.current.get(key) !== px) {
+      const prev = sizes.current.get(key)
+      if (prev !== px) {
+        noteMeasured(prev, px)
         sizes.current.set(key, px)
         geoChanged.current = true
       }
@@ -379,7 +435,9 @@ export function Ballast(props) {
           if (key === undefined) continue
           const px =
             entry.borderBoxSize?.[0]?.blockSize ?? entry.contentRect.height
-          if (px > 0 && sizes.current.get(key) !== px) {
+          const prev = sizes.current.get(key)
+          if (px > 0 && prev !== px) {
+            noteMeasured(prev, px)
             sizes.current.set(key, px)
             geoChanged.current = true
           }
@@ -397,8 +455,21 @@ export function Ballast(props) {
   // semantics; no blank flash on long jumps).
   if (apiRef) {
     apiRef.current = {
+      __debug: () => {
+        const el = getScroller()
+        const g = geo.current
+        return {
+          mode: { ...mode.current }, converging: converging.current,
+          origin: originRef.current, below: belowRef.current,
+          st: el?.scrollTop, total: g.total, win: { ...winRef.current },
+          eff: avgRef.current.eff, count: avgRef.current.count,
+          offsetOf: (k) => g.offsets[g.keys.indexOf(k)],
+          spacerTop: spacerTopRef.current?.style.height,
+        }
+      },
       scrollToDistanceFromBottomPx: (px = 0) => {
         mode.current = { kind: 'end', distance: px }
+        userScrolledRef.current = false
         converging.current = true
         geoChanged.current = true
         syncAndRestore()
@@ -412,6 +483,7 @@ export function Ballast(props) {
       // this primitive does not provide yet.
       anchorToKey: (key, viewportOffset = 0) => {
         mode.current = { kind: 'anchor', key, viewportOffset }
+        userScrolledRef.current = false
         converging.current = true
         geoChanged.current = true
         syncAndRestore()
@@ -430,7 +502,10 @@ export function Ballast(props) {
     // final scrollTop. A consume-once slot matches the first and misreads
     // every duplicate as a user scroll. Keep the expectation while events
     // match; only a NON-matching event (a real user scroll) clears it.
-    if (!isEcho) progTarget.current = null
+    if (!isEcho) {
+      progTarget.current = null
+      userScrolledRef.current = true
+    }
     const prevEventST = lastEventST.current
     lastEventST.current = el.scrollTop
     if (!isEcho && !converging.current) {
@@ -471,6 +546,41 @@ export function Ballast(props) {
   const onScrollRef = React.useRef(onScroll)
   onScrollRef.current = onScroll
 
+  // Toward-the-end wheel intent (the ChatGPT transcript's accumulator,
+  // minimally ported): while reading history, a user wheeling down races the
+  // streaming tail — every fence close grows the distance faster than a
+  // 120px wheel click closes it, so the bottom keeps receding and arrival
+  // feels like being bounced back (user-reported on wheel AND trackpad).
+  // Track the gesture in INTENT space instead: snapshot the distance when a
+  // downward run starts, subtract every downward delta, and when the user
+  // has wheeled the whole way — regardless of how much the content grew
+  // underneath — engage follow. Upward deltas or a 1s pause reset the run.
+  const towardRef = React.useRef({ remaining: null, lastT: 0 })
+  const noteWheelToward = (e, el) => {
+    if (mode.current.kind !== 'anchor' || converging.current) return
+    const now = performance.now()
+    const t = towardRef.current
+    const px =
+      e.deltaMode === 1 ? e.deltaY * 16 : e.deltaMode === 2 ? e.deltaY * el.clientHeight : e.deltaY
+    if (px <= 0) {
+      t.remaining = null
+      return
+    }
+    if (t.remaining === null || now - t.lastT > 1000)
+      t.remaining = el.scrollHeight - el.clientHeight - el.scrollTop
+    t.remaining -= px
+    t.lastT = now
+    if (t.remaining <= endThresholdRef.current) {
+      t.remaining = null
+      mode.current = { kind: 'end', distance: 0 }
+      userScrolledRef.current = false
+      userAway.current = 0
+      converging.current = true
+      geoChanged.current = true
+      syncAndRestore()
+    }
+  }
+
   // Listeners are attached imperatively rather than through JSX so both modes
   // take the same path, and so attach mode can also turn OFF the browser's own
   // scroll anchoring on a container it does not render: native anchoring picks
@@ -481,8 +591,9 @@ export function Ballast(props) {
     if (!el) return
     // Intent signals break convergence early: wheel/touchstart are USER INPUT,
     // unlike scroll events (which mix in our own writes and clamps).
-    const cancel = () => {
+    const cancel = (e) => {
       converging.current = false
+      if (e.type === 'wheel') noteWheelToward(e, el)
     }
     const prevAnchor = el.style.overflowAnchor
     el.style.overflowAnchor = 'none'

@@ -29,3 +29,23 @@ use a real, visible Chrome window.
 - `nudgestorm.mjs` — ~140 sub-threshold nudges at varied frame phases in one stream, reporting every disengage decision with the state that caused it.
 
 Both need `scenario=stream` plus a long `dur` (e.g. `&dur=120000`) so all samples land inside one streaming window; sampling after the stream ends measures a static list and reads as false failures.
+
+## Regression matrix
+
+`bench/matrix.mjs` runs the standard 8-profile matrix. It needs a dedicated
+bench Chrome whose occluded windows keep a real frame clock (plain background
+TABS are useless — `document.hidden` gates rAF off entirely):
+
+```bash
+"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
+  --remote-debugging-port=9224 --user-data-dir=/tmp/chrome-bench-9224 \
+  --no-first-run --disable-background-timer-throttling \
+  --disable-renderer-backgrounding --disable-backgrounding-occluded-windows \
+  --disable-features=IntensiveWakeUpThrottling &
+PORT=9224 node bench/matrix.mjs           # parallel smoke, ~35s
+CONC=1 PORT=9224 node bench/matrix.mjs    # serial, ~2min — use for receipts
+```
+
+Parallel mode contends for GPU/CPU with anything else running (including a
+human hand-testing in another Chrome): use it as a smoke test, and re-run
+failures serially on a quiet machine before believing them.
