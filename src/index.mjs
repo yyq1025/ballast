@@ -266,7 +266,10 @@ export function Ballast(props) {
 
   // Size both spacers so the mounted window occupies its true place in the
   // scroll range, under whatever geometry is current.
-  const writeSpacers = (w) => {
+  // `floor` mode only ever GROWS a spacer (used pre-mutation, where the new
+  // window's rows are not in the DOM yet: shrinking the bottom spacer there
+  // would make the transient shorter — the clamp window all over again).
+  const writeSpacers = (w, floor = false) => {
     const g = geo.current
     const empty = w.end < w.start || g.offsets.length === 0
     const top = empty ? 0 : g.offsets[w.start]
@@ -275,9 +278,13 @@ export function Ballast(props) {
       : w.end + 1 < g.offsets.length
         ? g.offsets[w.end + 1]
         : g.total
-    if (spacerTopRef.current) spacerTopRef.current.style.height = `${top}px`
-    if (spacerBottomRef.current)
-      spacerBottomRef.current.style.height = `${Math.max(0, g.total - belowEnd)}px`
+    const write = (ref, px) => {
+      if (!ref.current) return
+      if (floor && px <= (parseFloat(ref.current.style.height) || 0)) return
+      ref.current.style.height = `${px}px`
+    }
+    write(spacerTopRef, top)
+    write(spacerBottomRef, Math.max(0, g.total - belowEnd))
   }
 
   // Where a row identity + viewport offset puts scrollTop under the current
@@ -448,6 +455,24 @@ export function Ballast(props) {
     prevData.current = data
     geoChanged.current = true
   }
+
+  // Runs BEFORE this commit's DOM mutations (the useInsertionEffect
+  // contract): size the spacers for the NEW window while the OLD rows are
+  // still in the DOM. A window-slide commit otherwise has a gap between
+  // React removing evicted rows and our layout effect growing the spacer —
+  // and consumer row components' own layout effects run BEFORE ours
+  // (children first), so any of them forcing layout in that gap sees the
+  // collapsed height and the browser clamps scrollTop on the spot. The
+  // clamp is invisible to the pass (it happened pre-entry, no write of
+  // ours), so the live-anchor refresh then adopts it as the user's position
+  // (measured on the astryx ChatLayout arm: slow wheel near the bottom of a
+  // STATIC transcript yanked back 314-426px — the evicted rows' height —
+  // while plain-div harness rows never reproduced it). Pre-sizing makes the
+  // transient strictly TALLER (new spacer + old rows), which can never
+  // clamp; the mutations then bring it back to exact.
+  React.useInsertionEffect(() => {
+    writeSpacers(winRef.current, true)
+  })
 
   // Runs after EVERY commit — this is the pre-paint correction slot.
   React.useLayoutEffect(() => {
