@@ -41,6 +41,11 @@ export function Ballast(props) {
     // vs "logic" instantly (see docs/RESULTS.md ablation).
     measureMode = 'ro',
     apiRef,
+    // Optional item classifier (the LegendList averageSizes[itemType]
+    // mechanism): measured sizes feed a running average PER TYPE, so a
+    // corpus mixing tool-call stubs with long markdown converges to honest
+    // per-shape prices instead of one blended number.
+    getItemType,
     // ATTACH MODE. By default the list renders its own scroll container. Pass
     // the caller's scroll element instead and it renders a bare fragment
     // (spacers + windowed rows) into whatever container the caller already
@@ -104,6 +109,7 @@ export function Ballast(props) {
   // away from where the machinery last placed them — the end→anchor decision
   // runs on the latter (see onScroll).
   const lastEventST = React.useRef(null)
+  const lastUserEventT = React.useRef(0)
   const userAway = React.useRef(0)
   const geoChanged = React.useRef(false)
   // Convergence protection (generalized from a one-shot landing flag):
@@ -119,6 +125,10 @@ export function Ballast(props) {
   winRef.current = win
   const dataRef = React.useRef(data)
   dataRef.current = data
+  const measureModeRef = React.useRef(measureMode)
+  measureModeRef.current = measureMode
+  const endThresholdRef = React.useRef(endThreshold)
+  endThresholdRef.current = endThreshold
 
   // Running average of everything measured so far. A static estimate that
   // undershoots makes the bottom RECEDE while scrolling toward it: each cold
@@ -128,44 +138,75 @@ export function Ballast(props) {
   // Once samples exist they price unmeasured rows, so mounting a cold row
   // discovers ~nothing. An estimatedItemSize FUNCTION is authoritative and
   // never overridden (the consumer knows more than an average does).
-  // The raw average accumulates continuously, but the EFFECTIVE price moves
-  // with hysteresis (>5% relative change) and never while converging: every
-  // effective-average change reprices every unmeasured row at once, so a
-  // freely-tracking average makes anchor targets chase a moving sum during
-  // landings (measured: declared jumps 200px off after 20 frames) and adds
-  // repricing jumps under fast scroll (measured: 1.1% at step=60).
-  const avgRef = React.useRef({ sum: 0, count: 0, eff: 0 })
-  const noteMeasured = (prev, px) => {
-    const a = avgRef.current
-    if (prev === undefined) {
-      a.sum += px
-      a.count += 1
-    } else a.sum += px - prev
+  // Raw averages accumulate continuously — one bucket per item type when
+  // getItemType is given, plus a global bucket as the cold-start fallback —
+  // but the EFFECTIVE price moves with hysteresis (>10% relative change) and
+  // never while converging: every effective change reprices every unmeasured
+  // row at once, so a freely-tracking average makes anchor targets chase a
+  // moving sum during landings (measured: declared jumps 200px off after 20
+  // frames) and adds repricing jumps under fast scroll (measured: 1.1% at
+  // step=60). Repricing must also mark the geometry dirty, or the recompute
+  // shifts every offset while the restore skips its write (measured: a
+  // declared anchor deterministically 44px off).
+  const GLOBAL_BUCKET = '\u0000global'
+  const bucketsRef = React.useRef(new Map())
+  const typeByKey = React.useRef(new Map())
+  const bucket = (t) => {
+    let b = bucketsRef.current.get(t)
+    if (!b) bucketsRef.current.set(t, (b = { sum: 0, count: 0, eff: 0 }))
+    return b
   }
-  const effectiveAvg = () => {
-    const a = avgRef.current
-    if (a.count === 0) return 0
-    const raw = a.sum / a.count
-    if (a.eff === 0) a.eff = raw
-    else if (!converging.current && Math.abs(raw - a.eff) > a.eff * 0.05) {
-      a.eff = raw
-      // Repricing every unmeasured row IS a geometry change: without this
-      // flag the recompute shifts all offsets, the spacers follow, but the
-      // restore skips its write and scrollTop is left priced under the old
-      // average (measured: a declared anchor deterministically 44px off).
+  const noteMeasured = (key, prev, px) => {
+    for (const t of [GLOBAL_BUCKET, typeByKey.current.get(key)]) {
+      if (t === undefined) continue
+      const b = bucket(t)
+      if (prev === undefined) {
+        b.sum += px
+        b.count += 1
+      } else b.sum += px - prev
+    }
+  }
+  // A bucket's effective price INITIALIZES from whatever the row was priced
+  // at before the bucket existed — the global average, or the static
+  // estimate — so a type first encountered mid-scroll is not a cliff: its
+  // rows keep their current price and refine from there under the same
+  // hysteresis as everyone else. (An earlier version initialized buckets
+  // from zero-with-fallback, which made the first per-type pricing a mass
+  // repricing event in its own right.)
+  const effectiveAvg = (t, baseline) => {
+    const b = bucketsRef.current.get(t)
+    // Below 5 samples a bucket's raw mean is noise (one tall outlier moves
+    // it 10%+ per sample, and every crossing is a mass repricing): stay on
+    // the inherited baseline until the mean has some mass behind it.
+    if (!b || b.count < 5) return baseline
+    const raw = b.sum / b.count
+    if (b.eff === 0) b.eff = baseline > 0 ? baseline : raw
+    if (
+      !converging.current &&
+      // ...and only while scrolling is QUIET: a repricing event moves every
+      // unmeasured offset at once, costing ~one frame at up-to-step-size
+      // deviation if it lands mid-scroll. A quarter second of scroll silence
+      // defers the same correction into frames nobody is watching. (Streams
+      // reprice freely — machinery echoes are not user events.)
+      performance.now() - lastUserEventT.current > 250 &&
+      Math.abs(raw - b.eff) > b.eff * 0.1
+    ) {
+      b.eff = raw
       geoChanged.current = true
     }
-    return a.eff
+    return b.eff
   }
   const estOf = React.useCallback(
     (item, i) => {
       if (typeof estimatedItemSize === 'function')
         return estimatedItemSize(item, i)
-      const eff = effectiveAvg()
-      return eff > 0 ? eff : estimatedItemSize
+      const global = effectiveAvg(GLOBAL_BUCKET, estimatedItemSize)
+      return getItemType
+        ? effectiveAvg(getItemType(item, i), global)
+        : global
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [estimatedItemSize],
+    [estimatedItemSize, getItemType],
   )
 
   const recompute = React.useCallback(() => {
@@ -341,7 +382,7 @@ export function Ballast(props) {
       if (px === 0) continue
       const prev = sizes.current.get(key)
       if (prev !== px) {
-        noteMeasured(prev, px)
+        noteMeasured(key, prev, px)
         sizes.current.set(key, px)
         geoChanged.current = true
       }
@@ -418,11 +459,6 @@ export function Ballast(props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scrollElement])
 
-  const measureModeRef = React.useRef(measureMode)
-  measureModeRef.current = measureMode
-  const endThresholdRef = React.useRef(endThreshold)
-  endThresholdRef.current = endThreshold
-
   // In 'sync' mode the RO is only a backstop for out-of-commit size changes
   // (images, fonts). In 'ro' mode it IS the measurement pipeline: sizes come
   // from the observed border-box (no forced layout anywhere).
@@ -437,7 +473,7 @@ export function Ballast(props) {
             entry.borderBoxSize?.[0]?.blockSize ?? entry.contentRect.height
           const prev = sizes.current.get(key)
           if (px > 0 && prev !== px) {
-            noteMeasured(prev, px)
+            noteMeasured(key, prev, px)
             sizes.current.set(key, px)
             geoChanged.current = true
           }
@@ -448,11 +484,21 @@ export function Ballast(props) {
   }
   React.useEffect(() => () => roRef.current?.disconnect(), [])
 
-  // Imperative API. scrollToDistanceFromBottomPx is a DECLARATION, not a
-  // scroll action: it re-points the reference frame and lets the restore
-  // loop converge — the window is computed from the desired bottom first,
-  // so the destination renders before the position lands (committed
-  // semantics; no blank flash on long jumps).
+  // A DECLARATION re-points the reference frame and lets the restore loop
+  // converge: machine-driven regime, displacement cleared, protected from
+  // mode flips until reached. The window is computed from the declared
+  // target first, so the destination renders before the position lands
+  // (committed semantics; no blank flash on long jumps).
+  const declare = (m) => {
+    mode.current = m
+    userScrolledRef.current = false
+    userAway.current = 0
+    converging.current = true
+    geoChanged.current = true
+    syncAndRestore()
+  }
+
+  // Imperative API — both methods are declarations, not scroll actions.
   if (apiRef) {
     apiRef.current = {
       __debug: () => {
@@ -462,18 +508,15 @@ export function Ballast(props) {
           mode: { ...mode.current }, converging: converging.current,
           origin: originRef.current, below: belowRef.current,
           st: el?.scrollTop, total: g.total, win: { ...winRef.current },
-          eff: avgRef.current.eff, count: avgRef.current.count,
+          buckets: Object.fromEntries(
+            [...bucketsRef.current].map(([t, b]) => [t, { count: b.count, eff: +b.eff.toFixed(1) }]),
+          ),
           offsetOf: (k) => g.offsets[g.keys.indexOf(k)],
           spacerTop: spacerTopRef.current?.style.height,
         }
       },
-      scrollToDistanceFromBottomPx: (px = 0) => {
-        mode.current = { kind: 'end', distance: px }
-        userScrolledRef.current = false
-        converging.current = true
-        geoChanged.current = true
-        syncAndRestore()
-      },
+      scrollToDistanceFromBottomPx: (px = 0) =>
+        declare({ kind: 'end', distance: px }),
       // Hold one row at a fixed viewport offset (0 = its top edge at the
       // viewport top — the "pin the new prompt to the top" pattern). Same
       // declaration semantics; the reference frame just becomes a row
@@ -481,13 +524,8 @@ export function Ballast(props) {
       // absorbed. Note the position still clamps to the scrollable range:
       // pinning a row near the end needs reserved space below it, which
       // this primitive does not provide yet.
-      anchorToKey: (key, viewportOffset = 0) => {
-        mode.current = { kind: 'anchor', key, viewportOffset }
-        userScrolledRef.current = false
-        converging.current = true
-        geoChanged.current = true
-        syncAndRestore()
-      },
+      anchorToKey: (key, viewportOffset = 0) =>
+        declare({ kind: 'anchor', key, viewportOffset }),
     }
   }
 
@@ -505,6 +543,7 @@ export function Ballast(props) {
     if (!isEcho) {
       progTarget.current = null
       userScrolledRef.current = true
+      lastUserEventT.current = performance.now()
     }
     const prevEventST = lastEventST.current
     lastEventST.current = el.scrollTop
@@ -572,12 +611,7 @@ export function Ballast(props) {
     t.lastT = now
     if (t.remaining <= endThresholdRef.current) {
       t.remaining = null
-      mode.current = { kind: 'end', distance: 0 }
-      userScrolledRef.current = false
-      userAway.current = 0
-      converging.current = true
-      geoChanged.current = true
-      syncAndRestore()
+      declare({ kind: 'end', distance: 0 })
     }
   }
 
@@ -627,6 +661,7 @@ export function Ballast(props) {
   if (win.end >= win.start) {
     for (let i = win.start; i <= Math.min(win.end, data.length - 1); i++) {
       const key = keyExtractor(data[i], i)
+      if (getItemType) typeByKey.current.set(key, getItemType(data[i], i))
       children.push(
         h(
           'div',

@@ -1377,6 +1377,7 @@ function RestProto({ messages, items: realItems }) {
         keyExtractor=${(_item, i) => String(i)}
         renderItem=${renderItem}
         estimatedItemSize=${est}
+        getItemType=${realItems && params.get('type') !== '0' ? (item) => item.kind : undefined}
         style=${{ height: '100%' }}
       />
     </div>
@@ -1507,12 +1508,17 @@ warm state that the services assume across restarts.`
 // One row renderer for both halves of the comparison, so the only difference
 // between them is who decides which rows exist.
 function renderChatRow(m) {
+  // Vertical rhythm lives INSIDE the row (paddingBottom) rather than as a
+  // container gap: flex gap is spacing offsetHeight cannot see, so it would
+  // silently break the geometry ledger under virtualization.
   return html`
-    <${Chat.ChatMessage} key=${m.id} sender=${m.sender}>
-      ${m.sender === 'user'
-        ? html`<${Chat.ChatMessageBubble}><${AstryxMarkdown}>${m.text}<//><//>`
-        : html`<${AstryxMarkdown}>${m.text}<//>`}
-    <//>
+    <div key=${m.id} style=${{ paddingBottom: 12 }}>
+      <${Chat.ChatMessage} sender=${m.sender}>
+        ${m.sender === 'user'
+          ? html`<${Chat.ChatMessageBubble}><${AstryxMarkdown}>${m.text}<//><//>`
+          : html`<${AstryxMarkdown}>${m.text}<//>`}
+      <//>
+    </div>
   `
 }
 
@@ -1528,7 +1534,7 @@ const VIRT = params.get('virt') === '1'
 // virtualizer ATTACHES to it through the layout's own published context
 // (useChatLayoutContext -> scrollContainerRef). Rows render into the layout's
 // content region as a bare fragment, so nothing nests a second scroller.
-function VirtualizedMessages({ messages, apiRef, scrollElRef }) {
+function VirtualizedMessages({ messages, apiRef, scrollElRef, isStreaming }) {
   const ctx = Chat.useChatLayoutContext()
   const [scrollEl, setScrollEl] = React.useState(null)
   // The layout's ref is populated during commit, after this child's effects,
@@ -1537,15 +1543,22 @@ function VirtualizedMessages({ messages, apiRef, scrollElRef }) {
     setScrollEl(ctx?.scrollContainerRef?.current ?? null)
     if (scrollElRef) scrollElRef.current = ctx?.scrollContainerRef?.current ?? null
   }, [ctx])
-  return html`<${ProtoList}
-    scrollElement=${scrollEl}
-    apiRef=${apiRef}
-    measureMode=${params.get('measure') || 'ro'}
-    data=${messages}
-    keyExtractor=${(m) => m.id}
-    renderItem=${({ item }) => renderChatRow(item)}
-    estimatedItemSize=${120}
-  />`
+  // The list SHELL stays: ChatMessageList keeps its padding, role="log" and
+  // aria-busy streaming semantics — only its children become windowed. gap=0
+  // because flex gap is spacing the row measurements cannot see; rows carry
+  // their own paddingBottom instead.
+  return html`<${Chat.ChatMessageList} gap=${0} isStreaming=${isStreaming}>
+    <${ProtoList}
+      scrollElement=${scrollEl}
+      apiRef=${apiRef}
+      measureMode=${params.get('measure') || 'ro'}
+      data=${messages}
+      keyExtractor=${(m) => m.id}
+      renderItem=${({ item }) => renderChatRow(item)}
+      estimatedItemSize=${120}
+      getItemType=${(m) => m.sender}
+    />
+  <//>`
 }
 
 // ChatLayout's own scroll-to-bottom button jumps in DOM space: its spring
@@ -1662,8 +1675,8 @@ function ChatLayoutApp() {
         scrollButton=${VIRT ? html`<${VirtScrollButton} apiRef=${virtApiRef} scrollElRef=${virtScrollElRef} />` : undefined}
       >
         ${VIRT
-          ? html`<${VirtualizedMessages} messages=${messages} apiRef=${virtApiRef} scrollElRef=${virtScrollElRef} />`
-          : html`<${Chat.ChatMessageList} isStreaming=${isStreaming}>
+          ? html`<${VirtualizedMessages} messages=${messages} apiRef=${virtApiRef} scrollElRef=${virtScrollElRef} isStreaming=${isStreaming} />`
+          : html`<${Chat.ChatMessageList} gap=${0} isStreaming=${isStreaming}>
               ${messages.map((m) => renderChatRow(m))}
             <//>`}
       <//>
