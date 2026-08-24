@@ -1,0 +1,13 @@
+{
+  "name": "ballast",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Experimental virtualized list for React web — aggregate spacers, bottom-distance bookkeeping, identity-anchor override, switchable measurement pipeline",
+  "type": "module",
+  "main": "src/index.mjs",
+  "exports": { ".": "./src/index.mjs" },
+  "license": "MIT",
+  "author": "Yueqian Yang",
+  "peerDependencies": { "react": ">=18" },
+  "scripts": { "harness": "node harness/server.mjs" }
+}

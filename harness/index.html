@@ -1,0 +1,1517 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>tanstack-virtual streaming tail flicker repro</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #141414; color: #ddd; }
+  body.light { background: #fff; color: #1c1c1c; }
+  body.light .msg { border-bottom-color: #eee; }
+  body.light .msg .role { color: #999; }
+  body.light .msg pre { background: #f6f6f8; }
+  .bench-chat { flex: 1; min-height: 0; }
+  body.cv .cvrow { content-visibility: auto; contain-intrinsic-size: auto 80px; }
+  #root { display: flex; flex-direction: column; height: 100vh; }
+  .transcript { flex: 1; overflow-y: auto; contain: strict; }
+  .msg { padding: 10px 18px; border-bottom: 1px solid #232323; font-size: 14px; line-height: 1.5; }
+  .msg .role { color: #7a7a7a; font-size: 11px; margin-bottom: 4px; text-transform: uppercase; }
+  .msg pre { background: #1e1e2a; padding: 10px; border-radius: 6px; overflow-x: auto; font-size: 12px; }
+  .msg code { font-family: ui-monospace, monospace; }
+  .msg h3 { margin: 8px 0 4px; }
+  .msg ul { margin: 4px 0; }
+  #hud { position: fixed; top: 8px; right: 20px; background: #000d; border: 1px solid #333;
+         padding: 10px 12px; font: 11px/1.5 ui-monospace, monospace; z-index: 9; white-space: pre; border-radius: 6px; }
+  #hud .bad { color: #ff6b6b; }
+  #hud .ok { color: #69db7c; }
+</style>
+<div id="root"></div>
+<div id="hud">loading…</div>
+<script type="importmap">
+{ "imports": { "react": "https://esm.sh/react@19" } }
+</script>
+<script type="module">
+import React from 'https://esm.sh/react@19'
+import { createRoot } from 'https://esm.sh/react-dom@19/client'
+import htm from 'https://esm.sh/htm@3.1.1'
+
+const html = htm.bind(React.createElement)
+const params = new URLSearchParams(location.search)
+// Toggles:
+//   ?rv=3.13.12        pin react-virtual version (default latest 3.14.6)
+//   ?rafRO=1           useAnimationFrameWithResizeObserver: true
+//   ?transition=1      wrap streaming setState in startTransition (emulates deferred rendering)
+//   ?smooth=1          followOnAppend: 'smooth'
+//   ?rate=20           chunk interval ms (default 35)
+//   ?md=marked|plain|streamdown   markdown renderer (default marked — Codex's real stack;
+//                                 streamdown@2.5.0 hard-freezes the renderer on this workload)
+//   ?list=tanstack|astryx|legend|virtuoso
+//                          list strategy (astryx = ChatLayout, non-virtualized;
+//                          legend = @legendapp/list react entry, chat-first virtualizer;
+//                          virtuoso = @virtuoso.dev/message-list, commercial chat
+//                          virtualizer — localhost evaluation per its EULA, no key)
+//   ?ivb=N                 virtuoso increaseViewportBy px (default 0)
+//   ?scenario=stream|rest|reflow|scrollup
+//                          rest = static N messages, land, idle 25s, measure memory
+//                          scrollup = land at bottom, then scroll up at constant
+//                          speed through UNMEASURED history; estimate→measured
+//                          swaps drive above-viewport compensation. Jitter =
+//                          anchor-row motion deviating from the commanded step.
+//   ?size=N                message count for rest scenario
+//   ?est=N|kind            estimateSize override: fixed px, or per-kind
+//                          heuristic (mix=real only) like a production integration
+//   ?step=N                scrollup px per frame (default 10)
+const RV_VER = params.get('rv') || '3.14.6'
+const RATE = Number(params.get('rate') || 35)
+const USE_TRANSITION = params.get('transition') === '1'
+const LIST = params.get('list') || 'tanstack'
+const SCENARIO = params.get('scenario') || 'stream'
+const SIZE = Number(params.get('size') || 1000)
+// ?mix=code|real — real = calibrated from 182 local sessions: 70% folded tool
+// groups (4-6 calls each), 10% plain user prompts (~420ch), 20% assistant
+// prose (~490ch, 1/16 with code fence, 1/10 with table)
+const MIX = params.get('mix') || 'code'
+const EST = params.get('est') || null
+const STEP = Number(params.get('step') || 10)
+const MD_MODE = params.get('plain') === '1' ? 'plain'
+  : (params.get('md') || (LIST === 'astryx' || SCENARIO === 'rest' || SCENARIO === 'reflow' || SCENARIO === 'scrollup' ? 'astryx' : 'marked'))
+
+const { useVirtualizer } = await import(
+  `https://esm.sh/@tanstack/react-virtual@${RV_VER}?deps=react@19,react-dom@19`
+)
+
+let Streamdown = null
+let marked = null
+let AstryxMarkdown = null
+let AstryxTheme = null
+let astryxThemeObj = null
+if (MD_MODE === 'streamdown') {
+  try {
+    const mod = await import('https://esm.sh/streamdown@2.5.0?deps=react@19,react-dom@19')
+    Streamdown = mod.Streamdown ?? mod.default
+  } catch (e) {
+    console.warn('[repro] streamdown failed to load; falling back to plain', e)
+  }
+} else if (MD_MODE === 'marked') {
+  ;({ marked } = await import('https://esm.sh/marked'))
+} else if (MD_MODE === 'astryx') {
+  document.body.classList.add('light')
+  if (params.get('cv') === '1') document.body.classList.add('cv')
+  for (const href of [
+    'https://unpkg.com/@astryxdesign/core@0.1.6/src/reset.css',
+    'https://unpkg.com/@astryxdesign/core@0.1.6/dist/astryx.css',
+    'https://unpkg.com/@astryxdesign/theme-neutral@0.1.6/dist/theme.css',
+    'https://unpkg.com/@astryxdesign/core@0.1.6/src/tailwind-theme.css',
+  ]) {
+    const l = document.createElement('link')
+    l.rel = 'stylesheet'; l.href = href
+    document.head.appendChild(l)
+  }
+  const [md, th, nt] = await Promise.all([
+    import('https://esm.sh/@astryxdesign/core@0.1.6/Markdown?deps=react@19,react-dom@19'),
+    import('https://esm.sh/@astryxdesign/core@0.1.6/theme?deps=react@19,react-dom@19'),
+    import('https://esm.sh/@astryxdesign/theme-neutral@0.1.6/built?deps=react@19,react-dom@19'),
+  ])
+  AstryxMarkdown = md.Markdown
+  AstryxTheme = th.Theme
+  astryxThemeObj = nt.neutralTheme
+}
+
+let Chat = null
+if (LIST === 'astryx' || MIX === 'real' || MIX === 'wild') {
+  Chat = await import('https://esm.sh/@astryxdesign/core@0.1.6/Chat?deps=react@19,react-dom@19')
+}
+
+// ?lv=3.3.7 pins @legendapp/list for the legend arm
+let LegendList = null
+if (LIST === 'legend') {
+  const LV = params.get('lv') || '3.3.7'
+  ;({ LegendList } = await import(
+    `https://esm.sh/@legendapp/list@${LV}/react?deps=react@19,react-dom@19`
+  ))
+}
+
+// ?list=proto — local experimental virtualizer (proto-list.mjs): aggregate
+// spacers + bottom-distance bookkeeping + identity-anchor override
+let ProtoList = null
+if (LIST === 'proto') {
+  ;({ Ballast: ProtoList } = await import('../src/index.mjs'))
+}
+
+// ?list=virtua — inokawa/virtua VList (?vv= pins version). RO detection +
+// jump compensation in-library; follow/landing are USERLAND (the documented
+// virtua chat pattern) — that split is exactly what this arm measures.
+let Virtua = null
+if (LIST === 'virtua') {
+  const VV = params.get('vv') || '0.50.4'
+  Virtua = await import(`https://esm.sh/virtua@${VV}?deps=react@19,react-dom@19`)
+}
+
+// ?mv=1.17.1 pins @virtuoso.dev/message-list for the virtuoso arm
+let Virtuoso = null
+if (LIST === 'virtuoso') {
+  const MV = params.get('mv') || '1.17.1'
+  Virtuoso = await import(
+    `https://esm.sh/@virtuoso.dev/message-list@${MV}?deps=react@19,react-dom@19`
+  )
+}
+
+// ---------- content corpus ----------
+const PROSE = [
+  'The virtualizer compensates tail growth by writing scrollTop after the ResizeObserver reports the new size. ',
+  'On the web there is no atomic contentOffset adjustment, so the write lands at least one task after layout. ',
+  'Each streamed chunk grows the last item, and the sizer element only catches up on the next React commit. ',
+  'When a code fence closes, the block re-parses and its height jumps by several lines at once. ',
+]
+const CODE_LINES = [
+  'const items = virtualizer.getVirtualItems()',
+  'for (const item of items) {',
+  '  positions.set(item.key, item.start)',
+  '}',
+  'requestAnimationFrame(() => reconcile(positions))',
+  'export const pinError = (el) =>',
+  '  el.scrollHeight - el.clientHeight - el.scrollTop',
+]
+function* chunkGen() {
+  let i = 0
+  while (true) {
+    // prose burst
+    for (const s of PROSE) { for (const piece of s.match(/.{1,18}/g)) yield piece }
+    // heading + list (block-boundary reflow)
+    yield `\n\n### Segment ${++i}\n\n`
+    yield '- measure'; yield ' after render\n'; yield '- adjust'; yield ' after measure\n\n'
+    // growing code fence (the height-jump generator)
+    yield '```js\n'
+    for (const l of CODE_LINES) { yield l + '\n' }
+    yield '```\n\n'
+  }
+}
+
+// Deterministic transcript for the rest/memory scenario — same content both arms.
+function makeMessages(n) {
+  const out = []
+  for (let i = 0; i < n; i++) {
+    if (i % 3 === 0) {
+      out.push(`Message ${i}: how does the anchoring behave when item ${i} resizes during streaming reflow?`)
+    } else {
+      out.push(
+        `Message ${i}: the compensation path measures after render, then adjusts scroll after measuring. On the web there is no atomic contentOffset write, so every correction races the paint for this item.\n\n- measure after render\n- adjust after measure\n- reconcile against the live DOM\n\n### Detail ${i}\n\nWhen a code fence closes, the block re-parses and its height jumps by several lines at once.\n\n\`\`\`js\nconst items = virtualizer.getVirtualItems()\nfor (const item of items) {\n  positions.set(item.key, ${i})\n}\nrequestAnimationFrame(() => reconcile(positions))\n\`\`\`\n`,
+      )
+    }
+  }
+  return out
+}
+
+// mix=real corpus — composition calibrated from 182 local Claude Code sessions
+const USER_PROSE =
+  'Looking at the current implementation, I think the follow behavior should stay pinned during reflow instead of animating. Can you walk through how the compensation interacts with the layout pass here, and whether the anchor survives a container width change while we are scrolled up in history?'
+const ASST_PROSE =
+  'The compensation path measures after render and adjusts after measuring, so every correction races the paint. During a container reflow the anchor identity is preserved and positions are re-derived from the anchor item, which keeps the viewport stable without accumulating drift. The remaining cost is the layout pass itself, which scales with the number of nodes participating in reflow rather than with the correction logic.'
+const REAL_TABLE =
+  '\n\n| arm | nodes | memory | mount |\n|---|---|---|---|\n| astryx | 30k | 62MB | 0.9s |\n| tanstack | 153 | 22MB | 0.3s |\n| delta | 196x | 2.8x | 3x |\n'
+const REAL_FENCE =
+  '\n\n```js\nconst items = virtualizer.getVirtualItems()\nfor (const item of items) {\n  positions.set(item.key, item.start)\n}\n```\n'
+const TOOL_NAMES = ['Read', 'Edit', 'Bash', 'Grep', 'Write']
+// mix=wild — deliberately extreme height variance to stress estimate error:
+// 40% tiny (single tool call, tens of px), 30% medium, 20% large,
+// 10% huge (multi-paragraph + several fences + table, 2-4k px).
+function makeWildItems(n) {
+  const items = []
+  for (let i = 0; i < n; i++) {
+    const slot = i % 10
+    if (slot < 4) {
+      items.push({ kind: 'tools', calls: [{ key: `t${i}`, name: TOOL_NAMES[i % TOOL_NAMES.length], target: `src/mod${i % 40}.ts`, status: 'complete' }] })
+    } else if (slot < 7) {
+      items.push(i % 2 === 0
+        ? { kind: 'user', text: `Q${i}: ${USER_PROSE}` }
+        : { kind: 'asst', text: `A${i}: ${ASST_PROSE}` })
+    } else if (slot < 9) {
+      items.push({ kind: 'asst', text: `A${i}: ${ASST_PROSE} ${ASST_PROSE} ${ASST_PROSE}${REAL_FENCE}` })
+    } else {
+      let text = `A${i}: `
+      for (let k = 0; k < 8; k++) text += `${ASST_PROSE}\n\n### Section ${i}-${k}\n\n`
+      text += REAL_FENCE + REAL_TABLE + REAL_FENCE
+      items.push({ kind: 'asst', text })
+    }
+  }
+  return items
+}
+function makeItems(n) {
+  const items = []
+  let asst = 0
+  for (let i = 0; i < n; i++) {
+    const slot = i % 10
+    if (slot < 7) {
+      const calls = []
+      const numCalls = 4 + (i % 3)
+      for (let c = 0; c < numCalls; c++) {
+        calls.push({
+          key: `t${i}-${c}`,
+          name: TOOL_NAMES[(i + c) % TOOL_NAMES.length],
+          target: `src/core/module${(i + c) % 40}.ts`,
+          status: 'complete',
+        })
+      }
+      items.push({ kind: 'tools', calls })
+    } else if (slot === 7) {
+      items.push({ kind: 'user', text: `Q${i}: ${USER_PROSE}` })
+    } else {
+      asst++
+      let text = `A${i}: ${ASST_PROSE}`
+      if (asst % 16 === 0) text += REAL_FENCE
+      if (asst % 10 === 0) text += REAL_TABLE
+      items.push({ kind: 'asst', text })
+    }
+  }
+  return items
+}
+
+const seed = Array.from({ length: 40 }, (_, i) =>
+  i % 3 === 0
+    ? `Message ${i}: short question about virtualization?`
+    : `Message ${i}: a longer answer paragraph.\n\n- point one\n- point two\n\n\`\`\`js\nconst x = ${i}\n\`\`\``,
+)
+
+// ---------- instrumentation ----------
+const stats = {
+  frames: 0, unpinned: 0, flickerCycles: 0, maxPinErr: 0,
+  clippedTail: 0, startedAt: 0, done: false,
+}
+window.__stats = stats
+
+// ---------- app ----------
+function Message({ text, role }) {
+  const rendered = React.useMemo(
+    () => (marked ? marked.parse(text) : null),
+    [text],
+  )
+  const body = AstryxMarkdown
+    ? html`<${AstryxMarkdown}>${text}<//>`
+    : Streamdown
+      ? html`<${Streamdown}>${text}<//>`
+      : rendered !== null
+        ? html`<div dangerouslySetInnerHTML=${{ __html: rendered }} />`
+        : html`<pre style=${{ whiteSpace: 'pre-wrap', background: 'none', padding: 0 }}>${text}</pre>`
+  return html`<div><div class="role">${role}</div>${body}</div>`
+}
+
+function App() {
+  const parentRef = React.useRef(null)
+  const [messages, setMessages] = React.useState(() => [...seed, ''])
+
+  const virtualizer = useVirtualizer({
+    count: messages.length,
+    getScrollElement: () => parentRef.current,
+    estimateSize: () => 120,
+    overscan: 2,
+    anchorTo: 'end',
+    followOnAppend: params.get('smooth') === '1' ? 'smooth' : true,
+    useAnimationFrameWithResizeObserver: params.get('rafRO') === '1',
+  })
+
+  // streaming driver: grow the LAST message every RATE ms; new message every 6s
+  React.useEffect(() => {
+    const gen = chunkGen()
+    const apply = (fn) => (USE_TRANSITION ? React.startTransition(() => setMessages(fn)) : setMessages(fn))
+    const chunkTimer = setInterval(() => {
+      const { value } = gen.next()
+      apply((prev) => {
+        const next = prev.slice()
+        next[next.length - 1] += value
+        return next
+      })
+    }, RATE)
+    const msgTimer = setInterval(() => {
+      apply((prev) => [...prev, ''])
+    }, Number(params.get('msgms') || 6000))
+    const stopTimer = setTimeout(() => {
+      clearInterval(chunkTimer); clearInterval(msgTimer)
+      stats.done = true
+      console.log('[repro] FINAL', JSON.stringify(summarize()))
+    }, 30000)
+    return () => { clearInterval(chunkTimer); clearInterval(msgTimer); clearTimeout(stopTimer) }
+  }, [])
+
+  // land at the end once on mount (transcript opens scrolled to bottom)
+  React.useEffect(() => {
+    virtualizer.scrollToEnd({ behavior: 'auto' })
+  }, [])
+
+  // ?load=N — busy-spin N ms per frame to simulate main-thread contention
+  // (large transcripts, other panels). This is what makes corrections lose
+  // the race against paint in real apps.
+  React.useEffect(() => {
+    const loadMs = Number(params.get('load') || 0)
+    if (!loadMs) return
+    let raf
+    const spin = () => {
+      const t0 = performance.now()
+      while (performance.now() - t0 < loadMs) { /* burn */ }
+      raf = requestAnimationFrame(spin)
+    }
+    raf = requestAnimationFrame(spin)
+    return () => cancelAnimationFrame(raf)
+  }, [])
+
+  // frame-level pin-error sampler; starts counting after the first landed frame
+  React.useEffect(() => {
+    const el = parentRef.current
+    stats.startedAt = performance.now()
+    let prevUnpinned = false
+    let landed = false
+    let warmup = 0
+    let raf
+    const loop = () => {
+      if (!stats.done) {
+        if (!landed) {
+          // Warmup: force-pin to bottom for ~1.5s while initial measurements
+          // settle (dynamic sizes make estimate-based scrollToEnd land short —
+          // the classic first-fill problem). Then hand over to the library's
+          // own wasAtEnd/followOnAppend machinery and start counting.
+          el.scrollTop = el.scrollHeight
+          if (++warmup >= 90) {
+            landed = true
+            stats.startedAt = performance.now()
+          }
+          hud()
+          raf = requestAnimationFrame(loop)
+          return
+        }
+        // PRE-PAINT sample (rAF timing): includes transients that the
+        // same-frame ResizeObserver correction erases before paint. Upper bound.
+        const pinErrNow = el.scrollHeight - el.clientHeight - el.scrollTop
+        stats.frames++
+        const pinErr = pinErrNow
+        const unpinned = pinErr > 4
+        if (unpinned) {
+          stats.unpinned++
+          stats.maxPinErr = Math.max(stats.maxPinErr, pinErr)
+        }
+        if (unpinned && !prevUnpinned) stats.flickerCycles++
+        prevUnpinned = unpinned
+        // tail visually clipped below the fold?
+        const tail = el.querySelector('[data-tail="1"]')
+        if (tail) {
+          const tr = tail.getBoundingClientRect()
+          const cr = el.getBoundingClientRect()
+          if (tr.bottom > cr.bottom + 4) stats.clippedTail++
+        }
+        // POST-PAINT sample (macrotask fires after this frame paints): what
+        // the user's eye actually saw. Must match visual perception.
+        setTimeout(() => {
+          if (stats.done) return
+          stats.paintedFrames = (stats.paintedFrames || 0) + 1
+          const pe = el.scrollHeight - el.clientHeight - el.scrollTop
+          if (pe > 4) {
+            stats.paintedUnpinned = (stats.paintedUnpinned || 0) + 1
+            stats.paintedMaxPinErr = Math.max(stats.paintedMaxPinErr || 0, Math.round(pe))
+          }
+        }, 0)
+        hud()
+      }
+      raf = requestAnimationFrame(loop)
+    }
+    raf = requestAnimationFrame(loop)
+    return () => cancelAnimationFrame(raf)
+  }, [])
+
+  const items = virtualizer.getVirtualItems()
+  const last = messages.length - 1
+  return html`
+    <div class="transcript" ref=${parentRef}>
+      <div style=${{ height: virtualizer.getTotalSize(), width: '100%', position: 'relative' }}>
+        ${items.map((vi) => html`
+          <div
+            key=${vi.key}
+            data-index=${vi.index}
+            data-tail=${vi.index === last ? '1' : '0'}
+            ref=${virtualizer.measureElement}
+            class="msg"
+            style=${{ position: 'absolute', top: 0, left: 0, width: '100%', transform: `translateY(${vi.start}px)` }}
+          >
+            <${Message} text=${messages[vi.index]} role=${vi.index === last ? 'assistant (streaming)' : vi.index % 3 === 0 ? 'user' : 'assistant'} />
+          </div>
+        `)}
+      </div>
+    </div>
+  `
+}
+
+// ---------- legend stream arm ----------
+// Same streaming driver and dual-sampled pin-error instrumentation as the
+// tanstack App, but rendering through LegendList's own chat machinery
+// (initialScrollAtEnd + maintainScrollAtEnd); the library owns the landing
+// and the follow — no warmup force-pin, so the numbers include its landing.
+// Shared pinErr measurement for the legend/virtuoso stream arms: the list
+// lands by itself, 90 frames of settle, then dual-sampled pin error.
+function useStreamMeasurement() {
+  React.useEffect(() => {
+    stats.startedAt = performance.now()
+    let el = null
+    let prevUnpinned = false
+    let landed = false
+    let warmup = 0
+    let raf
+    const loop = () => {
+      el = el || findChatScrollEl()
+      if (!el || el.scrollHeight <= el.clientHeight) { raf = requestAnimationFrame(loop); return }
+      if (!stats.done) {
+        if (!landed) {
+          // Let the list's own initial landing settle; start counting
+          // after ~1.5s of settle, same window as the tanstack arm's warmup.
+          if (++warmup >= 90) {
+            landed = true
+            stats.startedAt = performance.now()
+          }
+          hud()
+          raf = requestAnimationFrame(loop)
+          return
+        }
+        const pinErr = el.scrollHeight - el.clientHeight - el.scrollTop
+        stats.frames++
+        const unpinned = pinErr > 4
+        if (unpinned) {
+          stats.unpinned++
+          stats.maxPinErr = Math.max(stats.maxPinErr, pinErr)
+        }
+        if (unpinned && !prevUnpinned) stats.flickerCycles++
+        prevUnpinned = unpinned
+        const tail = el.querySelector('[data-tail="1"]')
+        if (tail) {
+          const tr = tail.getBoundingClientRect()
+          const cr = el.getBoundingClientRect()
+          if (tr.bottom > cr.bottom + 4) stats.clippedTail++
+        }
+        setTimeout(() => {
+          if (stats.done) return
+          stats.paintedFrames = (stats.paintedFrames || 0) + 1
+          const pe = el.scrollHeight - el.clientHeight - el.scrollTop
+          if (pe > 4) {
+            stats.paintedUnpinned = (stats.paintedUnpinned || 0) + 1
+            stats.paintedMaxPinErr = Math.max(stats.paintedMaxPinErr || 0, Math.round(pe))
+          }
+        }, 0)
+        hud()
+      }
+      raf = requestAnimationFrame(loop)
+    }
+    raf = requestAnimationFrame(loop)
+    return () => cancelAnimationFrame(raf)
+  }, [])
+
+}
+
+function LegendStreamApp() {
+  const [messages, setMessages] = React.useState(() => [...seed, ''])
+
+  React.useEffect(() => {
+    const gen = chunkGen()
+    const apply = (fn) => (USE_TRANSITION ? React.startTransition(() => setMessages(fn)) : setMessages(fn))
+    const chunkTimer = setInterval(() => {
+      const { value } = gen.next()
+      apply((prev) => {
+        const next = prev.slice()
+        next[next.length - 1] += value
+        return next
+      })
+    }, RATE)
+    const msgTimer = setInterval(() => {
+      apply((prev) => [...prev, ''])
+    }, Number(params.get('msgms') || 6000))
+    const stopTimer = setTimeout(() => {
+      clearInterval(chunkTimer); clearInterval(msgTimer)
+      stats.done = true
+      console.log('[repro] FINAL', JSON.stringify(summarize()))
+    }, 30000)
+    return () => { clearInterval(chunkTimer); clearInterval(msgTimer); clearTimeout(stopTimer) }
+  }, [])
+
+  useStreamMeasurement()
+
+  const last = messages.length - 1
+  const renderItem = React.useCallback(({ item, index }) => html`
+    <div class="msg" data-tail=${index === last ? '1' : '0'}>
+      <${Message} text=${item} role=${index === last ? 'assistant (streaming)' : index % 3 === 0 ? 'user' : 'assistant'} />
+    </div>
+  `, [last])
+  return html`
+    <div style=${{ height: '100vh' }}>
+      <${LegendList}
+        data=${messages}
+        keyExtractor=${(_item, i) => String(i)}
+        renderItem=${renderItem}
+        estimatedItemSize=${EST !== null && EST !== 'kind' ? Number(EST) : 120}
+        initialScrollAtEnd=${true}
+        maintainScrollAtEnd=${true}
+        maintainVisibleContentPosition=${true}
+        recycleItems=${true}
+        style=${{ height: '100%' }}
+      />
+    </div>
+  `
+}
+
+// ---------- proto stream arm ----------
+function ProtoStreamApp() {
+  const [messages, setMessages] = React.useState(() => [...seed, ''])
+
+  React.useEffect(() => {
+    const gen = chunkGen()
+    const apply = (fn) => (USE_TRANSITION ? React.startTransition(() => setMessages(fn)) : setMessages(fn))
+    const chunkTimer = setInterval(() => {
+      const { value } = gen.next()
+      apply((prev) => {
+        const next = prev.slice()
+        next[next.length - 1] += value
+        return next
+      })
+    }, RATE)
+    const msgTimer = setInterval(() => {
+      apply((prev) => [...prev, ''])
+    }, Number(params.get('msgms') || 6000))
+    const stopTimer = setTimeout(() => {
+      clearInterval(chunkTimer); clearInterval(msgTimer)
+      stats.done = true
+      console.log('[repro] FINAL', JSON.stringify(summarize()))
+    }, 30000)
+    return () => { clearInterval(chunkTimer); clearInterval(msgTimer); clearTimeout(stopTimer) }
+  }, [])
+
+  useStreamMeasurement()
+
+  const last = messages.length - 1
+  const renderItem = React.useCallback(({ item, index }) => html`
+    <div class="msg" data-tail=${index === last ? '1' : '0'}>
+      <${Message} text=${item} role=${index === last ? 'assistant (streaming)' : index % 3 === 0 ? 'user' : 'assistant'} />
+    </div>
+  `, [last])
+  return html`
+    <div style=${{ height: '100vh' }}>
+      <${ProtoList}
+        measureMode=${params.get('measure') || 'sync'}
+        data=${messages}
+        keyExtractor=${(_item, i) => String(i)}
+        renderItem=${renderItem}
+        estimatedItemSize=${EST !== null && EST !== 'kind' ? Number(EST) : 120}
+        style=${{ height: '100%' }}
+      />
+    </div>
+  `
+}
+
+// ---------- virtua stream arm ----------
+function VirtuaStreamApp() {
+  const [messages, setMessages] = React.useState(() => [...seed, ''])
+  const ref = React.useRef(null)
+  const stickRef = React.useRef(true)
+
+  React.useEffect(() => {
+    const gen = chunkGen()
+    const apply = (fn) => (USE_TRANSITION ? React.startTransition(() => setMessages(fn)) : setMessages(fn))
+    const chunkTimer = setInterval(() => {
+      const { value } = gen.next()
+      apply((prev) => {
+        const next = prev.slice()
+        next[next.length - 1] += value
+        return next
+      })
+    }, RATE)
+    const msgTimer = setInterval(() => {
+      apply((prev) => [...prev, ''])
+    }, Number(params.get('msgms') || 6000))
+    const stopTimer = setTimeout(() => {
+      clearInterval(chunkTimer); clearInterval(msgTimer)
+      stats.done = true
+      console.log('[repro] FINAL', JSON.stringify(summarize()))
+    }, 30000)
+    return () => { clearInterval(chunkTimer); clearInterval(msgTimer); clearTimeout(stopTimer) }
+  }, [])
+
+  useStreamMeasurement()
+
+  // Userland follow done RIGHT: disengage only on INTENT signals (wheel/
+  // touchstart), never on scroll values — scrollToIndex's estimate-based
+  // landings fire scroll events that a value threshold misreads as the user
+  // scrolling away (measured: the naive version freezes mid-list). Scroll
+  // values only RE-engage when the user returns to the bottom.
+  React.useEffect(() => {
+    const el = findChatScrollEl()
+    if (!el) return
+    const off = () => { stickRef.current = false }
+    el.addEventListener('wheel', off, { passive: true })
+    el.addEventListener('touchstart', off, { passive: true })
+    return () => { el.removeEventListener('wheel', off); el.removeEventListener('touchstart', off) }
+  }, [])
+  React.useLayoutEffect(() => {
+    if (stickRef.current) {
+      ref.current?.scrollToIndex(messages.length - 1, { align: 'end' })
+    }
+  }, [messages])
+
+  const last = messages.length - 1
+  return html`
+    <div style=${{ height: '100vh' }}>
+      <${Virtua.VList}
+        ref=${ref}
+        data=${messages}
+        itemSize=${EST !== null && EST !== 'kind' ? Number(EST) : 120}
+        style=${{ height: '100%' }}
+        onScroll=${(offset) => {
+          const h = ref.current
+          if (h && !stickRef.current && offset >= h.scrollSize - h.viewportSize - 4)
+            stickRef.current = true
+        }}
+      >
+        ${(item, index) => html`
+          <div class="msg" key=${index} data-tail=${index === last ? '1' : '0'}>
+            <${Message} text=${item} role=${index === last ? 'assistant (streaming)' : index % 3 === 0 ? 'user' : 'assistant'} />
+          </div>
+        `}
+      <//>
+    </div>
+  `
+}
+
+// ---------- virtua prompt-pin arm (?pin=1) — the OFFICIAL chat pattern ----------
+// Replicates the Chatbot story: on each new exchange, scrollToIndex(prompt,
+// align 'start') pins the prompt to the viewport top and a viewport-height
+// blank is reserved below; the response streams into the reserve with ZERO
+// follow calls. Metric: painted stability of the pinned row (top must not
+// move outside an 800ms grace window after each pin action).
+function usePinMeasurement() {
+  React.useEffect(() => {
+    stats.startedAt = performance.now()
+    let raf
+    let prevTop = null
+    const loop = () => {
+      if (!stats.done) {
+        const pinEl = document.querySelector('[data-pin="1"]')
+        const graceUntil = (window.__lastPinAt ?? 0) + Number(params.get('grace') || 800)
+        setTimeout(() => {
+          if (stats.done) return
+          const el2 = document.querySelector('[data-pin="1"]')
+          if (el2 === null || performance.now() < graceUntil) { prevTop = null; return }
+          const top = el2.getBoundingClientRect().top
+          stats.pinSamples = (stats.pinSamples || 0) + 1
+          if (prevTop !== null && Math.abs(top - prevTop) > 1) {
+            stats.pinMoved = (stats.pinMoved || 0) + 1
+            stats.pinMaxPx = Math.max(stats.pinMaxPx || 0, Math.round(Math.abs(top - prevTop)))
+          }
+          prevTop = top
+        }, 0)
+        const hudEl = document.getElementById('hud')
+        hudEl.innerHTML = `virtua PIN pattern rate=${RATE}\n` +
+          `samples       ${stats.pinSamples || 0}\n` +
+          `pin moved     <span class="${stats.pinMoved ? 'bad' : 'ok'}">${stats.pinMoved || 0} (${(100 * (stats.pinMoved || 0) / Math.max(1, stats.pinSamples || 0)).toFixed(1)}%) max ${stats.pinMaxPx || 0}px</span>${stats.done ? '\n— DONE —' : ''}`
+      }
+      raf = requestAnimationFrame(loop)
+    }
+    raf = requestAnimationFrame(loop)
+    return () => cancelAnimationFrame(raf)
+  }, [])
+}
+
+function VirtuaPinApp() {
+  // exchanges: [...history, promptMsg, streamingMsg]; chunks feed the last.
+  const [state, setState] = React.useState(() => ({
+    msgs: [...seed, 'Q: (initial) prompt', ''],
+    pinIndex: seed.length,
+  }))
+  const ref = React.useRef(null)
+  const [blank, setBlank] = React.useState(0)
+
+  React.useEffect(() => {
+    const gen = chunkGen()
+    const chunkTimer = setInterval(() => {
+      const { value } = gen.next()
+      setState((prev) => {
+        const msgs = prev.msgs.slice()
+        msgs[msgs.length - 1] += value
+        return { ...prev, msgs }
+      })
+    }, RATE)
+    const msgTimer = setInterval(() => {
+      setState((prev) => {
+        const msgs = [...prev.msgs, `Q${prev.msgs.length}: ${USER_PROSE.slice(0, 120)}`, '']
+        return { msgs, pinIndex: msgs.length - 2 }
+      })
+    }, Number(params.get('msgms') || 6000))
+    const stopTimer = setTimeout(() => {
+      clearInterval(chunkTimer); clearInterval(msgTimer)
+      stats.done = true
+      console.log('[repro] FINAL', JSON.stringify({
+        config: { list: 'virtua-pin', rate: RATE },
+        pinSamples: stats.pinSamples || 0,
+        pinMoved: stats.pinMoved || 0,
+        pinMovedPct: +(100 * (stats.pinMoved || 0) / Math.max(1, stats.pinSamples || 0)).toFixed(1),
+        pinMaxPx: stats.pinMaxPx || 0,
+      }))
+    }, 30000)
+    return () => { clearInterval(chunkTimer); clearInterval(msgTimer); clearTimeout(stopTimer) }
+  }, [])
+
+  usePinMeasurement()
+
+  // The official pin action: next frame, smooth-scroll the prompt to the top
+  // and reserve a viewport of blank below (Chatbot story verbatim).
+  const pinIndex = state.pinIndex
+  React.useEffect(() => {
+    window.__lastPinAt = performance.now()
+    requestAnimationFrame(() => {
+      const h = ref.current
+      if (h) {
+        setBlank(h.viewportSize)
+        h.scrollToIndex(pinIndex, { smooth: true, align: 'start' })
+      }
+    })
+  }, [pinIndex])
+
+  const data = React.useMemo(() => [...state.msgs, '__blank__'], [state.msgs])
+  return html`
+    <div style=${{ height: '100vh' }}>
+      <${Virtua.VList}
+        ref=${ref}
+        data=${data}
+        itemSize=${120}
+        style=${{ height: '100%' }}
+      >
+        ${(item, index) => item === '__blank__'
+          ? html`<div key="blank" style=${{ height: blank }} />`
+          : html`
+            <div class="msg" key=${index} data-pin=${index === pinIndex ? '1' : '0'}>
+              <${Message} text=${item} role=${index === pinIndex ? 'user' : 'assistant'} />
+            </div>
+          `}
+      <//>
+    </div>
+  `
+}
+
+// ---------- virtuoso stream arm ----------
+// Declarative data+scrollModifier (the library's signature design): every
+// setState carries the scroll intent. Chunks → 'items-change' (streaming
+// growth, keeps bottom if at bottom); new message → 'auto-scroll-to-bottom'
+// with scrollToBottomIfAtBottom. ?smooth=1 switches both to smooth.
+function VirtuosoStreamApp() {
+  const mkMsg = (text, i) => ({ id: i, text })
+  const [state, setState] = React.useState(() => ({
+    data: [...seed, ''].map(mkMsg),
+    scrollModifier: { type: 'item-location', location: { index: 'LAST', align: 'end' } },
+  }))
+  // ?ib= items-change behavior (auto|instant|smooth); ?ab= append behavior
+  const behavior = params.get('ib') || (params.get('smooth') === '1' ? 'smooth' : 'auto')
+  const appendBehavior = params.get('ab') || behavior
+
+  React.useEffect(() => {
+    const gen = chunkGen()
+    const apply = (fn) => (USE_TRANSITION ? React.startTransition(() => setState(fn)) : setState(fn))
+    const chunkTimer = setInterval(() => {
+      const { value } = gen.next()
+      apply((prev) => {
+        const data = prev.data.slice()
+        const l = data.length - 1
+        data[l] = { id: data[l].id, text: data[l].text + value }
+        return { data, scrollModifier: { type: 'items-change', behavior } }
+      })
+    }, RATE)
+    const msgTimer = setInterval(() => {
+      apply((prev) => ({
+        data: [...prev.data, mkMsg('', prev.data.length)],
+        scrollModifier: {
+          type: 'auto-scroll-to-bottom',
+          autoScroll: ({ atBottom }) => (atBottom ? appendBehavior : false),
+        },
+      }))
+    }, Number(params.get('msgms') || 6000))
+    const stopTimer = setTimeout(() => {
+      clearInterval(chunkTimer); clearInterval(msgTimer)
+      stats.done = true
+      console.log('[repro] FINAL', JSON.stringify(summarize()))
+    }, 30000)
+    return () => { clearInterval(chunkTimer); clearInterval(msgTimer); clearTimeout(stopTimer) }
+  }, [])
+
+  useStreamMeasurement()
+
+  const last = state.data.length - 1
+  const ItemContent = React.useCallback(({ data, index, context }) => html`
+    <div class="msg" data-tail=${index === context.last ? '1' : '0'}>
+      <${Message} text=${data.text} role=${index === context.last ? 'assistant (streaming)' : index % 3 === 0 ? 'user' : 'assistant'} />
+    </div>
+  `, [])
+  return html`
+    <div style=${{ height: '100vh' }}>
+      <${Virtuoso.VirtuosoMessageListLicense} licenseKey="">
+        <${Virtuoso.VirtuosoMessageList}
+          style=${{ height: '100%' }}
+          data=${state}
+          context=${{ last }}
+          itemIdentity=${(m) => m.id}
+          computeItemKey=${({ data }) => data.id}
+          ItemContent=${ItemContent}
+          shortSizeAlign="bottom"
+          increaseViewportBy=${Number(params.get('ivb') || 0)}
+        />
+      <//>
+    </div>
+  `
+}
+
+// ---------- rest/memory scenario ----------
+function hudRest(phase) {
+  const el = document.getElementById('hud')
+  const s = stats
+  el.textContent =
+    `list=${LIST} size=${SIZE} mix=${MIX} md=${MD_MODE} rest\n` +
+    `phase      ${phase}\n` +
+    `mountMs    ${s.mountMs ?? '—'}\n` +
+    `landedMs   ${s.landedMs ?? '—'}\n` +
+    `nodes      ${s.nodes ?? '—'}\n` +
+    `jsHeapMB   ${s.jsHeapMB ?? '—'}\n` +
+    `uaTotalMB  ${s.uaTotalMB ?? '—'} (dom ${s.uaDomMB ?? '—'} / js ${s.uaJsMB ?? '—'})`
+}
+
+function useRestMeasurement(findScrollEl) {
+  React.useEffect(() => {
+    let raf
+    let stable = 0
+    let cachedEl = null
+    const finish = async (el) => {
+      hudRest('idle 25s')
+      await new Promise((r) => setTimeout(r, 25000))
+      stats.nodes = document.getElementsByTagName('*').length
+      const pm = performance.memory
+      if (pm) stats.jsHeapMB = +(pm.usedJSHeapSize / 1048576).toFixed(1)
+      stats.isolated = crossOriginIsolated ? 1 : 0
+      if (crossOriginIsolated && performance.measureUserAgentSpecificMemory) {
+        hudRest('measuring UA memory')
+        try {
+          const m = await Promise.race([
+            performance.measureUserAgentSpecificMemory(),
+            new Promise((_, rj) => setTimeout(() => rj(new Error('timeout')), 30000)),
+          ])
+          stats.uaTotalMB = +(m.bytes / 1048576).toFixed(1)
+          let dom = 0, js = 0, shared = 0
+          for (const b of m.breakdown) {
+            const t = (b.types || []).join(',')
+            if (t.includes('DOM')) dom += b.bytes
+            else if (t.includes('Shared')) shared += b.bytes
+            else if (t.includes('JavaScript')) js += b.bytes
+          }
+          stats.uaDomMB = +(dom / 1048576).toFixed(1)
+          stats.uaJsMB = +(js / 1048576).toFixed(1)
+          stats.uaSharedMB = +(shared / 1048576).toFixed(1)
+        } catch {}
+      }
+      stats.done = true
+      hudRest('DONE')
+      console.log('[bench] REST done')
+    }
+    const loop = () => {
+      const el = cachedEl ?? (cachedEl = findScrollEl())
+      if (el && el.scrollHeight > el.clientHeight) {
+        if (!stats.mountMs) stats.mountMs = Math.round(performance.now())
+        const pinErr = el.scrollHeight - el.clientHeight - el.scrollTop
+        if (pinErr > 4) {
+          el.scrollTop = el.scrollHeight
+          stable = 0
+        } else {
+          stable++
+        }
+        if (stable >= 30) {
+          stats.landedMs = Math.round(performance.now())
+          finish(el)
+          return
+        }
+      }
+      hudRest('landing')
+      raf = requestAnimationFrame(loop)
+    }
+    raf = requestAnimationFrame(loop)
+    return () => cancelAnimationFrame(raf)
+  }, [])
+}
+
+// ---------- reflow scenario ----------
+// Land at bottom (optionally scroll up 10 viewports), then run a 8s triangle-
+// wave width animation on #reflow-box while sampling per frame. After the
+// animation, sample 3s more to capture the settle curve (decay = spring path,
+// step = instant path).
+function useReflowMeasurement(findScrollEl) {
+  React.useEffect(() => {
+    const POS = params.get('pos') || 'bottom'
+    const RESIZE_MS = 8000
+    const SETTLE_MS = 3000
+    let raf, cachedEl = null
+    let phase = 'land'
+    let stable = 0
+    let anchorEl = null
+    let anchorBase = 0
+    let resizeStart = 0
+    let lastFrameT = 0
+    const frameDeltas = []
+    const settleCurve = []
+    let prevDrift = 0
+    const s = stats
+    s.pos = POS === 'up' ? 1 : 0
+
+    const box = () => document.getElementById('reflow-box')
+    const pinErr = (el) => el.scrollHeight - el.clientHeight - el.scrollTop
+
+    const pickAnchor = (el) => {
+      const top = el.getBoundingClientRect().top
+      let node = document.elementFromPoint(window.innerWidth / 2, top + 120)
+      const row = node && node.closest ? node.closest('.cvrow, .msg') : null
+      anchorEl = row || node
+      if (anchorEl) {
+        anchorBase = anchorEl.getBoundingClientRect().top - top
+      }
+    }
+
+    const finish = () => {
+      s.p95FrameMs = frameDeltas.length
+        ? +frameDeltas.sort((a, b) => a - b)[Math.floor(frameDeltas.length * 0.95)].toFixed(1)
+        : 0
+      s.settleCurve = settleCurve.slice(0, 120).map((v) => Math.round(v))
+      // settleMs: first time the metric stays ≤4px after resize end
+      let settleAt = -1
+      for (let i = 0; i < settleCurve.length; i++) {
+        if (Math.abs(settleCurve[i]) <= 4) { settleAt = i; break }
+      }
+      s.settleFrames = settleAt
+      s.done = true
+      hudReflow('DONE')
+      console.log('[bench] REFLOW done')
+    }
+
+    const loop = (t) => {
+      const el = cachedEl ?? (cachedEl = findScrollEl())
+      if (!el || el.scrollHeight <= el.clientHeight) {
+        raf = requestAnimationFrame(loop)
+        return
+      }
+      if (phase === 'land') {
+        const pe = pinErr(el)
+        if (pe > 4) { el.scrollTop = el.scrollHeight; stable = 0 } else stable++
+        if (stable >= 30) {
+          if (POS === 'up') {
+            el.scrollTop = Math.max(0, el.scrollTop - 10 * el.clientHeight)
+            phase = 'preanchor'
+            stable = 0
+          } else {
+            phase = 'resize'
+            resizeStart = performance.now()
+            lastFrameT = t
+          }
+        }
+      } else if (phase === 'preanchor') {
+        if (++stable >= 30) {
+          pickAnchor(el)
+          phase = 'resize'
+          resizeStart = performance.now()
+          lastFrameT = t
+        }
+      } else if (phase === 'resize') {
+        const elapsed = performance.now() - resizeStart
+        if (lastFrameT) frameDeltas.push(t - lastFrameT)
+        lastFrameT = t
+        // triangle wave, 2 cycles over RESIZE_MS: 100% -> 60% -> 100%
+        const cyc = (elapsed % (RESIZE_MS / 2)) / (RESIZE_MS / 2)
+        const tri = cyc < 0.5 ? cyc * 2 : (1 - cyc) * 2
+        box().style.width = `${100 - 40 * tri}%`
+        s.resizeFrames = (s.resizeFrames || 0) + 1
+        if (POS === 'bottom') {
+          const pe = pinErr(el)
+          if (pe > 4) {
+            s.resizeUnpinned = (s.resizeUnpinned || 0) + 1
+            s.resizeMaxErr = Math.max(s.resizeMaxErr || 0, Math.round(pe))
+          }
+        } else if (anchorEl) {
+          const drift = anchorEl.getBoundingClientRect().top - el.getBoundingClientRect().top - anchorBase
+          s.driftMax = Math.max(s.driftMax || 0, Math.round(Math.abs(drift)))
+          if (Math.abs(drift - prevDrift) > 2) s.driftCorrections = (s.driftCorrections || 0) + 1
+          prevDrift = drift
+        }
+        if (elapsed >= RESIZE_MS) {
+          box().style.width = '100%'
+          phase = 'settle'
+          resizeStart = performance.now()
+        }
+      } else if (phase === 'settle') {
+        const metric = POS === 'bottom'
+          ? pinErr(el)
+          : anchorEl
+            ? anchorEl.getBoundingClientRect().top - el.getBoundingClientRect().top - anchorBase
+            : 0
+        settleCurve.push(metric)
+        if (POS === 'up') s.driftFinal = Math.round(metric)
+        if (performance.now() - resizeStart >= SETTLE_MS) {
+          finish()
+          return
+        }
+      }
+      hudReflow(phase)
+      raf = requestAnimationFrame(loop)
+    }
+    raf = requestAnimationFrame(loop)
+    return () => cancelAnimationFrame(raf)
+  }, [])
+}
+
+// ---------- scrollup scenario ----------
+// Land at bottom (history above is virtualized-out and UNMEASURED), then
+// scroll up STEP px/frame. Each row entering overscan measures in; the
+// est→measured delta shifts every offset above and the compensation write
+// races paint. Jitter metric: an on-screen anchor row should move down by
+// exactly STEP per frame — any deviation is a visible jump. Dual-sampled:
+// rAF = pre-paint upper bound, setTimeout(0) = what the eye saw.
+// scrollHeight revisions per frame = scrollbar thrash from total-size re-derivation.
+function useScrollupMeasurement(findScrollEl) {
+  React.useEffect(() => {
+    const MAX_MS = 15000
+    let raf, cachedEl = null
+    let phase = 'land'
+    let stable = 0
+    let startT = 0
+    const s = stats
+    let anchorEl = null, anchorTopPre = 0, anchorTopPainted = null
+    let prevScrollHeight = 0
+    const pinErr = (el) => el.scrollHeight - el.clientHeight - el.scrollTop
+
+    const pickAnchor = (el) => {
+      const cr = el.getBoundingClientRect()
+      const node = document.elementFromPoint(window.innerWidth / 2, cr.top + cr.height / 2)
+      anchorEl = node && node.closest ? node.closest('.msg, .cvrow') : null
+      anchorTopPre = anchorEl ? anchorEl.getBoundingClientRect().top : 0
+      anchorTopPainted = null
+    }
+
+    const finish = () => {
+      s.done = true
+      hudScrollup('DONE')
+      console.log('[bench] SCROLLUP done', JSON.stringify(summarizeScrollup()))
+    }
+
+    const loop = () => {
+      const el = cachedEl ?? (cachedEl = findScrollEl())
+      if (!el || el.scrollHeight <= el.clientHeight) { raf = requestAnimationFrame(loop); return }
+      if (phase === 'land') {
+        const pe = pinErr(el)
+        if (pe > 4) { el.scrollTop = el.scrollHeight; stable = 0 } else stable++
+        if (stable >= 30) {
+          phase = 'scroll'
+          startT = performance.now()
+          prevScrollHeight = el.scrollHeight
+          pickAnchor(el)
+        }
+      } else if (phase === 'scroll') {
+        // 1. PRE-PAINT sample: where did last frame's step + compensation put the anchor?
+        if (anchorEl && anchorEl.isConnected) {
+          const top = anchorEl.getBoundingClientRect().top
+          const dev = Math.abs((top - anchorTopPre) - STEP)
+          s.scrollFrames = (s.scrollFrames || 0) + 1
+          if (dev > 4) {
+            s.jumpFrames = (s.jumpFrames || 0) + 1
+            s.maxJumpPx = Math.max(s.maxJumpPx || 0, Math.round(dev))
+          }
+          anchorTopPre = top
+        }
+        // re-pick when the anchor left the viewport or got unmounted
+        const cr = el.getBoundingClientRect()
+        if (!anchorEl || !anchorEl.isConnected ||
+            anchorEl.getBoundingClientRect().top > cr.bottom - 60) {
+          pickAnchor(el)
+        }
+        // scrollbar thrash: total size re-derived as estimates get replaced
+        const sh = el.scrollHeight
+        if (Math.abs(sh - prevScrollHeight) > 8) {
+          s.shRevisions = (s.shRevisions || 0) + 1
+          s.shMaxDelta = Math.max(s.shMaxDelta || 0, Math.abs(sh - prevScrollHeight))
+        }
+        prevScrollHeight = sh
+        // 2. the commanded step
+        el.scrollTop = Math.max(0, el.scrollTop - STEP)
+        // 3. POST-PAINT sample for this frame
+        const paintAnchor = anchorEl
+        setTimeout(() => {
+          if (s.done) { anchorTopPainted = null; return }
+          // fill rate: does painted content cover the viewport? 5 probes down
+          // the scroller's midline; any probe missing a row = a blank frame
+          // (tight overscan / slow mount shows up here, not in anchor motion).
+          {
+            const cr = el.getBoundingClientRect()
+            let miss = 0
+            const hit = (y) => { const n = document.elementFromPoint(cr.left + cr.width / 2, y); return !!(n && n.closest && n.closest('.msg, .cvrow')) }
+            for (let k = 0; k < 5; k++) {
+              const y = cr.top + 8 + (cr.height - 16) * k / 4
+              if (!hit(y)) { miss++; s.probeMiss = s.probeMiss || [0,0,0,0,0]; s.probeMiss[k]++ }
+            }
+            s.fillFrames = (s.fillFrames || 0) + 1
+            if (miss > 0) {
+              s.blankFrames = (s.blankFrames || 0) + 1; s.blankMaxProbes = Math.max(s.blankMaxProbes || 0, miss)
+              // size of the blank strip at the top edge (rows enter from the top when scrolling up)
+              let px = 0
+              while (px < 600 && !hit(cr.top + 2 + px)) px += 4
+              s.blankTopMaxPx = Math.max(s.blankTopMaxPx || 0, px)
+              s.blankTopSumPx = (s.blankTopSumPx || 0) + px
+            }
+          }
+          if (!paintAnchor || !paintAnchor.isConnected) { anchorTopPainted = null; return }
+          const top = paintAnchor.getBoundingClientRect().top
+          if (anchorTopPainted !== null && paintAnchor === anchorEl) {
+            const dev = Math.abs((top - anchorTopPainted) - STEP)
+            s.paintedScrollFrames = (s.paintedScrollFrames || 0) + 1
+            if (dev > 4) {
+              s.paintedJumpFrames = (s.paintedJumpFrames || 0) + 1
+              s.paintedMaxJumpPx = Math.max(s.paintedMaxJumpPx || 0, Math.round(dev))
+            }
+          }
+          anchorTopPainted = top
+        }, 0)
+        if (el.scrollTop <= 0 || performance.now() - startT >= MAX_MS) {
+          s.coveredPx = Math.round(prevScrollHeight - el.scrollTop - el.clientHeight)
+          finish()
+          return
+        }
+      }
+      hudScrollup(phase)
+      raf = requestAnimationFrame(loop)
+    }
+    raf = requestAnimationFrame(loop)
+    return () => cancelAnimationFrame(raf)
+  }, [])
+}
+
+function summarizeScrollup() {
+  const s = stats
+  return {
+    config: { list: LIST, rv: RV_VER, est: EST || 'default', step: STEP, size: SIZE, mix: MIX, rafRO: params.get('rafRO') === '1' },
+    scrollFrames: s.scrollFrames || 0,
+    jumpFrames: s.jumpFrames || 0,
+    jumpPct: +(100 * (s.jumpFrames || 0) / Math.max(1, s.scrollFrames || 0)).toFixed(1),
+    maxJumpPx: s.maxJumpPx || 0,
+    paintedScrollFrames: s.paintedScrollFrames || 0,
+    paintedJumpFrames: s.paintedJumpFrames || 0,
+    paintedJumpPct: +(100 * (s.paintedJumpFrames || 0) / Math.max(1, s.paintedScrollFrames || 0)).toFixed(1),
+    paintedMaxJumpPx: s.paintedMaxJumpPx || 0,
+    shRevisions: s.shRevisions || 0,
+    shMaxDelta: Math.round(s.shMaxDelta || 0),
+    fillFrames: s.fillFrames || 0,
+    blankFrames: s.blankFrames || 0,
+    blankPct: +(100 * (s.blankFrames || 0) / Math.max(1, s.fillFrames || 0)).toFixed(1),
+    blankMaxProbes: s.blankMaxProbes || 0,
+    probeMiss: s.probeMiss || [0,0,0,0,0],
+    blankTopMaxPx: s.blankTopMaxPx || 0,
+    blankTopAvgPx: Math.round((s.blankTopSumPx || 0) / Math.max(1, s.blankFrames || 0)),
+  }
+}
+
+function hudScrollup(phase) {
+  const el = document.getElementById('hud')
+  const s = summarizeScrollup()
+  el.innerHTML =
+    `scrollup list=${s.config.list} rv=${s.config.rv} est=${s.config.est} step=${s.config.step} size=${s.config.size} rafRO=${s.config.rafRO ? 1 : 0}\n` +
+    `phase         ${phase}\n` +
+    `frames        ${s.scrollFrames}\n` +
+    `jump(pre)     <span class="${s.jumpFrames ? 'bad' : 'ok'}">${s.jumpFrames} (${s.jumpPct}%) max ${s.maxJumpPx}px</span>\n` +
+    `jump(PAINTED) <span class="${s.paintedJumpFrames ? 'bad' : 'ok'}">${s.paintedJumpFrames} (${s.paintedJumpPct}%) max ${s.paintedMaxJumpPx}px</span>\n` +
+    `scrollbar     rev=${s.shRevisions} maxΔ=${s.shMaxDelta}px\n` +
+    `blank(PAINTED) <span class="${s.blankFrames ? 'bad' : 'ok'}">${s.blankFrames} (${s.blankPct}%) max ${s.blankMaxProbes}/5 probes; miss/probe=${s.probeMiss.join('/')}; top strip avg ${s.blankTopAvgPx}px max ${s.blankTopMaxPx}px</span>${stats.done ? '\n— DONE —' : ''}`
+}
+
+function hudReflow(phase) {
+  const el = document.getElementById('hud')
+  const s = stats
+  el.textContent =
+    `list=${LIST} size=${SIZE} mix=${MIX} reflow pos=${s.pos ? 'up' : 'bottom'}\n` +
+    `phase        ${phase}\n` +
+    `resizeFrames ${s.resizeFrames ?? '—'} p95=${s.p95FrameMs ?? '—'}ms\n` +
+    `unpinned     ${s.resizeUnpinned ?? '—'} maxErr=${s.resizeMaxErr ?? '—'}px\n` +
+    `drift        max=${s.driftMax ?? '—'} corr=${s.driftCorrections ?? '—'} final=${s.driftFinal ?? '—'}\n` +
+    `settleFrames ${s.settleFrames ?? '—'}`
+}
+
+function RestTanstack({ messages, items: realItems }) {
+  const parentRef = React.useRef(null)
+  const count = realItems ? realItems.length : messages.length
+  // ?est= — fixed px, or 'kind': per-item-kind heuristic the way a production
+  // integration would supply it (folded tool group scales with call count).
+  const estimate = React.useCallback((i) => {
+    if (EST === 'kind' && realItems) {
+      const it = realItems[i]
+      if (it.kind === 'tools') return 40 + 28 * it.calls.length
+      if (it.kind === 'user') return 120
+      return 260
+    }
+    if (EST !== null) return Number(EST)
+    return realItems ? 60 : 120
+  }, [realItems])
+  const virtualizer = useVirtualizer({
+    count,
+    getScrollElement: () => parentRef.current,
+    estimateSize: estimate,
+    overscan: 2,
+    anchorTo: 'end',
+    useAnimationFrameWithResizeObserver: params.get('rafRO') === '1',
+  })
+  const useMeasure = SCENARIO === 'reflow' ? useReflowMeasurement
+    : SCENARIO === 'scrollup' ? useScrollupMeasurement : useRestMeasurement
+  useMeasure(() => parentRef.current)
+  const items = virtualizer.getVirtualItems()
+  return html`
+    <div class="transcript" ref=${parentRef} style=${{ height: '100vh' }}>
+      <div style=${{ height: virtualizer.getTotalSize(), width: '100%', position: 'relative' }}>
+        ${items.map((vi) => html`
+          <div
+            key=${vi.key}
+            data-index=${vi.index}
+            ref=${virtualizer.measureElement}
+            class="msg"
+            style=${{ position: 'absolute', top: 0, left: 0, width: '100%', transform: `translateY(${vi.start}px)` }}
+          >
+            ${realItems
+              ? renderRealItem(realItems[vi.index], vi.index)
+              : html`<${Message} text=${messages[vi.index]} role=${vi.index % 3 === 0 ? 'user' : 'assistant'} />`}
+          </div>
+        `)}
+      </div>
+    </div>
+  `
+}
+
+function findChatScrollEl() {
+  let best = null
+  for (const d of document.querySelectorAll('div')) {
+    if (d.scrollHeight > d.clientHeight + 10) {
+      const oy = getComputedStyle(d).overflowY
+      if (oy === 'auto' || oy === 'scroll') {
+        if (!best || d.scrollHeight > best.scrollHeight) best = d
+      }
+    }
+  }
+  return best
+}
+
+function renderRealItem(item, i) {
+  if (item.kind === 'tools') {
+    return html`<${Chat.ChatToolCalls} key=${i} calls=${item.calls} />`
+  }
+  if (item.kind === 'user') {
+    return html`<${Chat.ChatMessage} key=${i} sender="user"><${Chat.ChatMessageBubble}><${AstryxMarkdown}>${item.text}<//><//><//>`
+  }
+  return html`<${Chat.ChatMessage} key=${i} sender="assistant"><${AstryxMarkdown}>${item.text}<//><//>`
+}
+
+// legend arm — the props the official ai-chat example and t3code web use:
+// initialScrollAtEnd + maintainScrollAtEnd + maintainVisibleContentPosition.
+// estimatedItemSize maps from ?est= (numeric only; 'kind' → weighted mean 190,
+// LegendList has no per-item estimate — identity anchoring is meant to make
+// estimate accuracy matter less, which is exactly what this arm measures).
+function RestLegend({ messages, items: realItems }) {
+  const useMeasure = SCENARIO === 'reflow' ? useReflowMeasurement
+    : SCENARIO === 'scrollup' ? useScrollupMeasurement : useRestMeasurement
+  useMeasure(findChatScrollEl)
+  const data = realItems ?? messages
+  const est = EST === 'kind' ? 190 : EST !== null ? Number(EST) : undefined
+  // ?type=0 disables getItemType to isolate the per-type running-average
+  // effect (state.averageSizes[itemType] refines estimates as rows measure in)
+  const getItemType = params.get('type') === '0' || !realItems
+    ? undefined
+    : (item) => item.kind
+  const renderItem = React.useCallback(({ item, index }) => html`
+    <div class="msg">
+      ${realItems
+        ? renderRealItem(item, index)
+        : html`<${Message} text=${item} role=${index % 3 === 0 ? 'user' : 'assistant'} />`}
+    </div>
+  `, [realItems])
+  return html`
+    <div style=${{ height: '100vh' }}>
+      <${LegendList}
+        data=${data}
+        keyExtractor=${(_item, i) => String(i)}
+        renderItem=${renderItem}
+        estimatedItemSize=${est}
+        getItemType=${getItemType}
+        initialScrollAtEnd=${true}
+        maintainScrollAtEnd=${true}
+        maintainVisibleContentPosition=${true}
+        recycleItems=${true}
+        style=${{ height: '100%' }}
+      />
+    </div>
+  `
+}
+
+// virtua arm — landing is userland too: one scrollToIndex(end) on mount.
+function RestVirtua({ messages, items: realItems }) {
+  const useMeasure = SCENARIO === 'reflow' ? useReflowMeasurement
+    : SCENARIO === 'scrollup' ? useScrollupMeasurement : useRestMeasurement
+  useMeasure(findChatScrollEl)
+  const ref = React.useRef(null)
+  const data = realItems ?? messages
+  const est = EST === 'kind' ? 190 : EST !== null ? Number(EST) : 120
+  React.useLayoutEffect(() => {
+    ref.current?.scrollToIndex(data.length - 1, { align: 'end' })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+  return html`
+    <div style=${{ height: '100vh' }}>
+      <${Virtua.VList} ref=${ref} data=${data} itemSize=${est} style=${{ height: '100%' }}>
+        ${(item, index) => html`
+          <div class="msg" key=${index}>
+            ${realItems
+              ? renderRealItem(item, index)
+              : html`<${Message} text=${item} role=${index % 3 === 0 ? 'user' : 'assistant'} />`}
+          </div>
+        `}
+      <//>
+    </div>
+  `
+}
+
+// proto arm — same est mapping as the legend arm for fairness.
+function RestProto({ messages, items: realItems }) {
+  const useMeasure = SCENARIO === 'reflow' ? useReflowMeasurement
+    : SCENARIO === 'scrollup' ? useScrollupMeasurement : useRestMeasurement
+  useMeasure(findChatScrollEl)
+  const apiRef = React.useRef(null)
+  window.__api = apiRef
+  const data = realItems ?? messages
+  const est = EST === 'kind' ? 190 : EST !== null ? Number(EST) : 120
+  const renderItem = React.useCallback(({ item, index }) => html`
+    <div class="msg">
+      ${realItems
+        ? renderRealItem(item, index)
+        : html`<${Message} text=${item} role=${index % 3 === 0 ? 'user' : 'assistant'} />`}
+    </div>
+  `, [realItems])
+  return html`
+    <div style=${{ height: '100vh' }}>
+      <${ProtoList}
+        measureMode=${params.get('measure') || 'sync'}
+        apiRef=${apiRef}
+        data=${data}
+        keyExtractor=${(_item, i) => String(i)}
+        renderItem=${renderItem}
+        estimatedItemSize=${est}
+        style=${{ height: '100%' }}
+      />
+    </div>
+  `
+}
+
+// virtuoso arm — no estimatedItemSize prop exists: unmeasured rows take the
+// library's own default/average, so ?est= does not apply here (that asymmetry
+// is itself a measured condition). initialLocation lands at the end.
+function RestVirtuoso({ messages, items: realItems }) {
+  const useMeasure = SCENARIO === 'reflow' ? useReflowMeasurement
+    : SCENARIO === 'scrollup' ? useScrollupMeasurement : useRestMeasurement
+  useMeasure(findChatScrollEl)
+  const data = React.useMemo(
+    () => (realItems ?? messages).map((item, i) => ({ id: i, item })),
+    [realItems, messages],
+  )
+  const ItemContent = React.useCallback(({ data: row, index }) => html`
+    <div class="msg">
+      ${realItems
+        ? renderRealItem(row.item, index)
+        : html`<${Message} text=${row.item} role=${index % 3 === 0 ? 'user' : 'assistant'} />`}
+    </div>
+  `, [realItems])
+  return html`
+    <div style=${{ height: '100vh' }}>
+      <${Virtuoso.VirtuosoMessageListLicense} licenseKey="">
+        <${Virtuoso.VirtuosoMessageList}
+          style=${{ height: '100%' }}
+          initialData=${data}
+          initialLocation=${{ index: 'LAST', align: 'end' }}
+          itemIdentity=${(m) => m.id}
+          computeItemKey=${({ data: row }) => row.id}
+          ItemContent=${ItemContent}
+          shortSizeAlign="bottom"
+          increaseViewportBy=${Number(params.get('ivb') || 0)}
+        />
+      <//>
+    </div>
+  `
+}
+
+function RestAstryx({ messages, items }) {
+  const useMeasure = SCENARIO === 'reflow' ? useReflowMeasurement
+    : SCENARIO === 'scrollup' ? useScrollupMeasurement : useRestMeasurement
+  useMeasure(findChatScrollEl)
+  return html`
+    <div style=${{ height: '100vh', display: 'flex', flexDirection: 'column' }}>
+      <${Chat.ChatLayout} className="bench-chat">
+        <${Chat.ChatMessageList} gap=${3}>
+          ${items
+            ? items.map((item, i) => html`<div class="cvrow" key=${i}>${renderRealItem(item, `${i}-inner`)}</div>`)
+            : messages.map((m, i) =>
+                i % 3 === 0
+                  ? html`<${Chat.ChatMessage} key=${i} sender="user"><${Chat.ChatMessageBubble}><${AstryxMarkdown}>${m}<//><//><//>`
+                  : html`<${Chat.ChatMessage} key=${i} sender="assistant"><${AstryxMarkdown}>${m}<//><//>`,
+              )}
+        <//>
+      <//>
+    </div>
+  `
+}
+
+function summarize() {
+  const secs = (performance.now() - stats.startedAt) / 1000
+  return {
+    config: { list: LIST, rv: RV_VER, rafRO: params.get('rafRO') === '1', transition: USE_TRANSITION, smooth: params.get('smooth') === '1', rate: RATE, md: AstryxMarkdown ? 'astryx' : Streamdown ? 'streamdown' : marked ? 'marked' : 'plain' },
+    seconds: +secs.toFixed(1),
+    frames: stats.frames,
+    unpinnedFrames: stats.unpinned,
+    unpinnedPct: +(100 * stats.unpinned / Math.max(1, stats.frames)).toFixed(1),
+    flickerCycles: stats.flickerCycles,
+    clippedTailFrames: stats.clippedTail,
+    maxPinErrPx: Math.round(stats.maxPinErr),
+    paintedFrames: stats.paintedFrames || 0,
+    paintedUnpinned: stats.paintedUnpinned || 0,
+    paintedUnpinnedPct: +(100 * (stats.paintedUnpinned || 0) / Math.max(1, stats.paintedFrames || 0)).toFixed(1),
+    paintedMaxPinErrPx: stats.paintedMaxPinErr || 0,
+  }
+}
+
+function hud() {
+  const s = summarize()
+  const el = document.getElementById('hud')
+  el.innerHTML =
+    `rv=${s.config.rv} rafRO=${s.config.rafRO ? 1 : 0} transition=${s.config.transition ? 1 : 0} smooth=${s.config.smooth ? 1 : 0} md=${s.config.md}\n` +
+    `frames        ${s.frames}\n` +
+    `unpinned      <span class="${s.unpinnedFrames ? 'bad' : 'ok'}">${s.unpinnedFrames} (${s.unpinnedPct}%)</span>\n` +
+    `flickerCycles <span class="${s.flickerCycles ? 'bad' : 'ok'}">${s.flickerCycles}</span>\n` +
+    `clippedTail   <span class="${s.clippedTailFrames ? 'bad' : 'ok'}">${s.clippedTailFrames}</span>\n` +
+    `maxPinErr     ${s.maxPinErrPx}px\n` +
+    `PAINTED unpin <span class="${s.paintedUnpinned ? 'bad' : 'ok'}">${s.paintedUnpinned} (${s.paintedUnpinnedPct}%) max ${s.paintedMaxPinErrPx}px</span>${stats.done ? '\n— DONE —' : ''}`
+}
+
+let appTree
+if (SCENARIO === 'rest' || SCENARIO === 'reflow' || SCENARIO === 'scrollup') {
+  const msgs = MIX === 'real' || MIX === 'wild' ? null : makeMessages(SIZE)
+  const realItems = MIX === 'wild' ? makeWildItems(SIZE) : MIX === 'real' ? makeItems(SIZE) : null
+  const inner = LIST === 'astryx'
+    ? html`<${RestAstryx} messages=${msgs} items=${realItems} />`
+    : LIST === 'legend'
+      ? html`<${RestLegend} messages=${msgs} items=${realItems} />`
+      : LIST === 'virtuoso'
+        ? html`<${RestVirtuoso} messages=${msgs} items=${realItems} />`
+        : LIST === 'proto'
+          ? html`<${RestProto} messages=${msgs} items=${realItems} />`
+          : LIST === 'virtua'
+            ? html`<${RestVirtua} messages=${msgs} items=${realItems} />`
+            : html`<${RestTanstack} messages=${msgs} items=${realItems} />`
+  appTree = html`<div id="reflow-box" style=${{ width: '100%' }}>${inner}</div>`
+} else {
+  appTree = LIST === 'legend' ? html`<${LegendStreamApp} />`
+    : LIST === 'virtuoso' ? html`<${VirtuosoStreamApp} />`
+    : LIST === 'proto' ? html`<${ProtoStreamApp} />`
+    : LIST === 'virtua' ? (params.get('pin') === '1' ? html`<${VirtuaPinApp} />` : html`<${VirtuaStreamApp} />`)
+    : html`<${App} />`
+}
+if (AstryxTheme) {
+  appTree = html`<${AstryxTheme} theme=${astryxThemeObj}>${appTree}<//>`
+}
+createRoot(document.getElementById('root')).render(appTree)
+</script>
