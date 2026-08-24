@@ -25,6 +25,7 @@ export default {
       '@virtuoso.dev/message-list',
       '@astryxdesign/core/Markdown', '@astryxdesign/core/theme',
       '@astryxdesign/core/Chat', '@astryxdesign/theme-neutral/built',
+      '@astryxdesign/lab',
     ],
   },
 

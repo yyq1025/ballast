@@ -94,6 +94,16 @@ const [AstryxMd, AstryxTh, AstryxNeutral] = await Promise.all([
   import('@astryxdesign/core/theme'),
   import('@astryxdesign/theme-neutral/built'),
 ])
+// ?list=logstream measures astryx's own lab LogStream — a second in-repo
+// consumer of follow-at-end semantics, shipped with "there is NO
+// virtualization" as a documented limit (content-visibility: auto rows).
+let LabLogStream = null
+if (LIST === 'logstream') {
+  const l = document.createElement('link')
+  l.rel = 'stylesheet'; l.href = '/node_modules/@astryxdesign/lab/dist/lab.css'
+  document.head.appendChild(l)
+  ;({ LogStream: LabLogStream } = await import('@astryxdesign/lab'))
+}
 const AstryxMarkdown = AstryxMd.Markdown
 const AstryxTheme = AstryxTh.Theme
 const astryxThemeObj = AstryxNeutral.neutralTheme
@@ -1451,12 +1461,87 @@ function hud() {
   const el = document.getElementById('hud')
   el.innerHTML =
     `rv=${s.config.rv} rafRO=${s.config.rafRO ? 1 : 0} transition=${s.config.transition ? 1 : 0} smooth=${s.config.smooth ? 1 : 0}\n` +
+    (s.unfollowEvents !== undefined ? `unfollowEvents ${s.unfollowEvents}\n` : '') +
     `frames        ${s.frames}\n` +
     `unpinned      <span class="${s.unpinnedFrames ? 'bad' : 'ok'}">${s.unpinnedFrames} (${s.unpinnedPct}%)</span>\n` +
     `flickerCycles <span class="${s.flickerCycles ? 'bad' : 'ok'}">${s.flickerCycles}</span>\n` +
     `clippedTail   <span class="${s.clippedTailFrames ? 'bad' : 'ok'}">${s.clippedTailFrames}</span>\n` +
     `maxPinErr     ${s.maxPinErrPx}px\n` +
     `PAINTED unpin <span class="${s.paintedUnpinned ? 'bad' : 'ok'}">${s.paintedUnpinned} (${s.paintedUnpinnedPct}%) max ${s.paintedMaxPinErrPx}px</span>${stats.done ? '\n— DONE —' : ''}`
+}
+
+// ---------- astryx lab LogStream arm ----------
+// Instruments THEIR follow logic, not ours. LogStream decides "the user
+// scrolled away" from the live distance to the bottom
+// (FOLLOW_THRESHOLD_PX = 24) inside a scroll handler, while a separate effect
+// pins scrollTop on append — the shape that produced spurious disengages in
+// ballast before the displacement-based fix. Controlled mode mirrors their own
+// ControlledFollow story: onFollowChange drives state, so every unfollow is
+// counted here.
+function LogStreamApp() {
+  const LEVELS = ['info', 'debug', 'warn', 'error']
+  const makeEntry = (i) => ({
+    id: `l-${i}`,
+    timestamp: `14:${String(Math.floor(i / 60) % 60).padStart(2, '0')}:${String(i % 60).padStart(2, '0')}.${String(i % 1000).padStart(3, '0')}`,
+    level: LEVELS[i % 4],
+    source: ['api-gateway', 'auth', 'billing', 'deploy'][i % 4],
+    // ?short=1 uses one-line messages, matching astryx's own LogStream
+    // stories; the default wraps to 2-4 lines like real structured logs.
+    message: params.get('short') === '1'
+      ? `GET /v1/projects 200 in ${40 + (i % 60)}ms`
+      : `event ${i}: ${'upstream latency exceeds budget, retrying with backoff '.repeat(1 + (i % 3))}`,
+  })
+  const [entries, setEntries] = React.useState(() =>
+    Array.from({ length: SIZE }, (_, i) => makeEntry(i)),
+  )
+  const [following, setFollowing] = React.useState(true)
+  const unfollows = React.useRef(0)
+  const onFollowChange = React.useCallback((next) => {
+    if (!next) {
+      unfollows.current += 1
+      const el = document.querySelector('[role="log"]')
+      if (el) {
+        ;(window.__unfollows = window.__unfollows || []).push({
+          t: Math.round(performance.now()),
+          dist: Math.round(el.scrollHeight - el.scrollTop - el.clientHeight),
+          st: Math.round(el.scrollTop), sh: el.scrollHeight,
+          anchor: getComputedStyle(el).overflowAnchor,
+        })
+      }
+    }
+    setFollowing(next)
+    stats.unfollowEvents = unfollows.current
+    // ?refollow=1 simulates the user hitting "Jump to latest" every time the
+    // tail disengages — measures whether follow is recoverable under a
+    // sustained stream or immediately drops again.
+    if (!next && params.get('refollow') === '1') {
+      setTimeout(() => setFollowing(true), 300)
+    }
+  }, [])
+
+  React.useEffect(() => {
+    let n = SIZE
+    const timer = setInterval(() => {
+      setEntries((prev) => [...prev, makeEntry(n++)])
+    }, RATE)
+    const stopTimer = setTimeout(() => {
+      clearInterval(timer)
+      stats.done = true
+      console.log('[repro] FINAL', JSON.stringify(summarize()))
+    }, DUR)
+    return () => { clearInterval(timer); clearTimeout(stopTimer) }
+  }, [])
+
+  useStreamMeasurement()
+
+  return html`<div style=${{ height: '100vh', display: 'flex', flexDirection: 'column' }}>
+    <${LabLogStream}
+      entries=${entries}
+      isFollowing=${following}
+      onFollowChange=${onFollowChange}
+      maxHeight="100vh"
+    />
+  </div>`
 }
 
 let appTree
@@ -1476,7 +1561,8 @@ if (SCENARIO === 'rest' || SCENARIO === 'reflow' || SCENARIO === 'scrollup') {
             : html`<${RestTanstack} messages=${msgs} items=${realItems} />`
   appTree = html`<div id="reflow-box" style=${{ width: '100%' }}>${inner}</div>`
 } else {
-  appTree = LIST === 'legend' ? html`<${LegendStreamApp} />`
+  appTree = LIST === 'logstream' ? html`<${LogStreamApp} />`
+    : LIST === 'legend' ? html`<${LegendStreamApp} />`
     : LIST === 'virtuoso' ? html`<${VirtuosoStreamApp} />`
     : LIST === 'proto' ? html`<${ProtoStreamApp} />`
     : LIST === 'virtua' ? (params.get('pin') === '1' ? html`<${VirtuaPinApp} />` : html`<${VirtuaStreamApp} />`)

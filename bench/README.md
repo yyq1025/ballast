@@ -24,6 +24,7 @@ use a real, visible Chrome window.
 ## Interaction probes
 
 - `followprobe.mjs` — inside an active stream, nudge the viewport up by less than `endThreshold` and verify follow-at-end survives; reports pass/fail per sample.
+- `logstreamprobe.mjs` — instruments astryx lab LogStream's own follow logic (`?list=logstream`).
 - `anchorprobe.mjs` — imperative `anchorToKey` long jumps: blank frames, frames-to-land, final offset.
 - `nudgestorm.mjs` — ~140 sub-threshold nudges at varied frame phases in one stream, reporting every disengage decision with the state that caused it.
 
