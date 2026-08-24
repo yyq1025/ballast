@@ -47,9 +47,11 @@ Gesture axes (CDP touch gestures / real human hand, `wild` high-variance corpus)
 | Axis | ballast sync | ballast ro | LegendList | TanStack |
 |---|---|---|---|---|
 | Flick+fling content reversal | **0%** | 0.7–0.9% / max 473px (was 2.1% / 1513px pre-fix) | 0% | 1.3% / 728px |
-| Hand slow-scroll: scrollTop churn (programmatic / finger input) | — | **≈1:1** † | — | **13:1** |
-| Hand slow-scroll: top-region pop rate | — | 2.4%, all 1-frame † | — | 4.6%, up to 2-frame |
+| Hand slow-scroll: scrollTop churn (programmatic / finger input) | — | **≈1:1** † | — | **13:1** (3.14.6 — superseded, see below) |
+| Hand slow-scroll: top-region pop rate | — | 2.4%, all 1-frame † | — | 4.6%, up to 2-frame (3.14.6) |
 | Hand mixed-speed gesture, fixed build: content reversal | — | **0 / 1092 active frames** (51,000px scrolled) | — | — |
+
+**TanStack 3.14.10 update (2026-08-24)**: a paired equal-cold re-round measured the churn ratio collapsed to ≈2.7:1 (with the subject scrolling the TanStack arm harder), zero reversals on both arms, and comparable pop rates — the subject blind-reported no perceptible difference. The 13:1 signature is a 3.14.6-era artifact; upstream fixed the felt class, and the remaining scripted gap (11.1% of frames at ≤10px vs 0%) is below hand-perception threshold. Dated details in `docs/RESULTS.md`.
 
 † collected on the pre-fix pure-RO build. The fixed build has been hand-checked (zero reversals, row above), but the churn ratio and pop rate are *paired* measurements — they need both arms scrolled in the same gesture regime, and the fixed-build round ran ~2.3× faster per wheel event than the original. Re-collection as a controlled pair is pending. Note that `max pop` (1,584px) reproduced to the pixel across builds and rounds: it is set by the corpus (the tallest `wild` row's estimate→measured delta), not by the algorithm — only pop *rate* and *persistence* are algorithm-sensitive.
 
