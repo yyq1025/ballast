@@ -715,7 +715,7 @@ export function Ballast(props) {
     // window resize or a growing composer moves the end-mode target and the
     // window coverage without any row changing size. Container entries have
     // no data-pkey — the RO callback marks the geometry dirty for them.
-    // TEMP bisect: container observe off
+    roRef.current?.observe(el)
     return () => {
       el.style.overflowAnchor = prevAnchor
       el.removeEventListener('scroll', scrollHandler)
