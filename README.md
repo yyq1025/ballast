@@ -49,8 +49,9 @@ Gesture axes (CDP touch gestures / real human hand, `wild` high-variance corpus)
 | Flick+fling content reversal | **0%** | 0.7–0.9% / max 473px (was 2.1% / 1513px pre-fix) | 0% | 1.3% / 728px |
 | Hand slow-scroll: scrollTop churn (programmatic / finger input) | — | **≈1:1** † | — | **13:1** |
 | Hand slow-scroll: top-region pop rate | — | 2.4%, all 1-frame † | — | 4.6%, up to 2-frame |
+| Hand mixed-speed gesture, fixed build: content reversal | — | **0 / 1092 active frames** (51,000px scrolled) | — | — |
 
-† collected on the pre-fix pure-RO build; re-collection on the fixed build pending.
+† collected on the pre-fix pure-RO build. The fixed build has been hand-checked (zero reversals, row above), but the churn ratio and pop rate are *paired* measurements — they need both arms scrolled in the same gesture regime, and the fixed-build round ran ~2.3× faster per wheel event than the original. Re-collection as a controlled pair is pending. Note that `max pop` (1,584px) reproduced to the pixel across builds and rounds: it is set by the corpus (the tallest `wild` row's estimate→measured delta), not by the algorithm — only pop *rate* and *persistence* are algorithm-sensitive.
 
 The hand-feel metrics (churn ratio, entering-region pop rate, pop persistence) are, to our knowledge, novel — scripted constant-step scrolling, CDP wheel events (smoothing-masked), and CDP touch drags (JS writes stomped mid-drag) all fail to reproduce what a human hand feels; the derivation is in `docs/RESULTS.md`.
 
