@@ -1,5 +1,7 @@
 # Benchmark results & methodology
 
+This file is the **versioned archive**: original measurements with dated updates as libraries moved. The README's receipts tables carry the current-stack matrix (fully re-measured 2026-08-24 on react-virtual 3.14.10 + astryx 0.4.7 + Vite; that re-run also measured both former RO-gear residuals — flick reversals and est=40 — at 0% on the new corpus, mechanisms still un-isolated).
+
 All numbers: same machine, real Chrome 151 (headed, `--remote-debugging-port`), same corpus per comparison. Dual sampling everywhere: rAF = pre-paint upper bound, rAF+setTimeout(0) = painted truth (what the eye can see). Library versions: @legendapp/list 3.3.7, @tanstack/react-virtual 3.14.6 (see the dated 3.14.10 note under the scroll-up table), virtua 0.50.4, @virtuoso.dev/message-list 1.17.1 (localhost evaluation per its EULA), @astryxdesign 0.1.6 for rows/control (0.4.7 after 2026-08-24).
 
 ## 1. Scripted axes

@@ -29,37 +29,35 @@ Supporting machinery that the benchmarks forced into existence (each was a measu
 
 ## Receipts (same corpus, same machine, real Chrome)
 
+All cells measured 2026-08-24 on one stack: Chrome 151, @tanstack/react-virtual 3.14.10, @legendapp/list 3.3.7, @virtuoso.dev/message-list 1.17.1 (localhost evaluation), astryx 0.4.7 rows, Vite-served. Versioned history — including TanStack's 3.14.6 regression-window numbers (virtual#1227) and the pure-RO ablation — lives in `docs/RESULTS.md`.
+
 Scripted axes — painted (user-visible) artifact frames:
 
 | Axis | ballast sync | ballast ro | LegendList web | TanStack | Virtuoso ML |
 |---|---|---|---|---|---|
-| Scroll-up cold history (10px/f) | **0%** | **0%** | 0.1% | 14.4% | 0% |
-| Scroll-up, bad estimates (est=40) | **0%** | 6.4% | — | 20.8% | — |
-| Fast-scroll blank strip (60px/f) | **0%** | 0% | 0% | — | 67% |
-| Stream follow 29 upd/s | **0%** | 1% / max 41px | 1.5% | 0.5% | 31.5% |
-| Stream follow 50 upd/s | **0%** | 0.1% | 1.6–3.3% | — | jump-to-top bug |
+| Scroll-up cold history (10px/f) | **0%** | **0%** | 0.1% / 100px | 11.1% / ≤10px | 0% jump; 2.6% blank strip |
+| Scroll-up, bad estimates (est=40) | **0%** | **0%** | — | 10.4% / ≤10px | — |
+| Fast-scroll blank strip (60px/f) | **0%** | **0%** | 0% | — | 69.6% (default overscan; `increaseViewportBy` fixes) |
+| Stream follow 29 upd/s | **0%** | 0.1% / max 21px | 1.4% / 62px | 0.2% / 21px | 32.8% (monotonic lag) |
+| Stream follow 50 upd/s | **0%** | 0.2% / max 21px | 1.7% / 164px | — | 87.5% / 9,487px (jump-to-top bug) |
 | Long jump to bottom (blank frames) | **0** | — | — | — | — |
 
-(ro-gear numbers include the first-mount sync backstop; the pure-RO ablation numbers it replaced — 20.9% / 16.3% / 0.8% — are preserved in `docs/RESULTS.md`. TanStack column measured on 3.14.6 — which sat inside an 8-week upstream regression window (virtual#1227, core 3.16.0 → fixed in 3.14.9); on 3.14.10 the scroll-up cell re-measures at 11.1% with max jump collapsed to 10px. Frequency is architectural; magnitude/churn were regression-era. Dated note in RESULTS.)
-
-Gesture axes (CDP touch gestures / real human hand, `wild` high-variance corpus):
+Gesture axes (`wild` high-variance corpus):
 
 | Axis | ballast sync | ballast ro | LegendList | TanStack |
 |---|---|---|---|---|
-| Flick+fling content reversal | **0%** | 0.7–0.9% / max 473px (was 2.1% / 1513px pre-fix) | 0% | 1.3% / 728px |
-| Hand slow-scroll: scrollTop churn (programmatic / finger input) | — | **≈1:1** † | — | **13:1** (3.14.6 — superseded, see below) |
-| Hand slow-scroll: top-region pop rate | — | 2.4%, all 1-frame † | — | 4.6%, up to 2-frame (3.14.6) |
-| Hand mixed-speed gesture, fixed build: content reversal | — | **0 / 1092 active frames** (51,000px scrolled) | — | — |
+| Flick+fling content reversal (CDP touch) | **0%** | **0%** | 0% | 0% |
+| Hand paired round: scrollTop moved per wheel event | — | **57 px** | — | 154 px (≈2.7:1, subject scrolling this arm *harder*) |
+| Hand paired round: entering-region pop rate | — | 8.1% | — | 9.7% |
+| Hand paired round: content reversal | — | **0** | — | **0** |
 
-**TanStack 3.14.10 update (2026-08-24)**: a paired equal-cold re-round measured the churn ratio collapsed to ≈2.7:1 (with the subject scrolling the TanStack arm harder), zero reversals on both arms, and comparable pop rates — the subject blind-reported no perceptible difference. The 13:1 signature is a 3.14.6-era artifact; upstream fixed the felt class, and the remaining scripted gap (11.1% of frames at ≤10px vs 0%) is below hand-perception threshold. Dated details in `docs/RESULTS.md`.
-
-† collected on the pre-fix pure-RO build. The fixed build has been hand-checked (zero reversals, row above), but the churn ratio and pop rate are *paired* measurements — they need both arms scrolled in the same gesture regime, and the fixed-build round ran ~2.3× faster per wheel event than the original. Re-collection as a controlled pair is pending. Note that `max pop` (1,584px) reproduced to the pixel across builds and rounds: it is set by the corpus (the tallest `wild` row's estimate→measured delta), not by the algorithm — only pop *rate* and *persistence* are algorithm-sensitive.
+The hand round was equal-cold and flick-heavy; the subject blind-reported no perceptible difference between the two arms — consistent with the scripted gap (11.1% of frames at ≤10px) sitting below hand-perception threshold. At flick speed, pop magnitude is corpus-set (the tallest wild row's estimate delta) on both arms; only pop rate and persistence are algorithm-sensitive. The 3.14.6-era hand numbers (13:1 churn against a regression-window TanStack) and their derivation are archived in `docs/RESULTS.md`.
 
 The hand-feel metrics (churn ratio, entering-region pop rate, pop persistence) are, to our knowledge, novel — scripted constant-step scrolling, CDP wheel events (smoothing-masked), and CDP touch drags (JS writes stomped mid-drag) all fail to reproduce what a human hand feels; the derivation is in `docs/RESULTS.md`.
 
 ## Known debts (honest list)
 
-- **RO-gear residuals**: flick reversals 0.7–0.9% / max 473px (better than TanStack's 1.3% / 728px, not zero), and 6.4% / max 262px on the deliberately-broken-estimates axis (est=40) with the mechanism not yet isolated. The previous version of this entry estimated the RO deficit fix at 300–500 lines of "same-frame correction discipline" — falsified: the measured fix was ~40 lines (first-mount sync backstop + entry/exit claim + sticky echo + direction gate; derivation in `docs/RESULTS.md`).
+- **RO-gear residuals are corpus-sensitive, not closed**: on the current corpus (astryx 0.4.7) both former residuals measure 0% — flick reversals (was 0.7–0.9% / 473px) and the est=40 axis (was 6.4% / 262px) — but neither mechanism was ever isolated, so treat them as dormant until a reproducing corpus is found, not fixed. Historical numbers in `docs/RESULTS.md`. The previous version of this entry estimated the RO deficit fix at 300–500 lines of "same-frame correction discipline" — falsified: the measured fix was ~40 lines (first-mount sync backstop + entry/exit claim + sticky echo + direction gate).
 - **Chromium-only**: zero Safari/Firefox verification. virtua's e2e suite (Playwright, real WebKit, per-browser tolerances) is the porting reference.
 - **No a11y yet**: document flow makes the Rocksteady/ChatGPT a11y patterns (aria-posinset on flow rows, focus return) cheap to add, but none are implemented.
 - **Feature surface is minimal**: no recycling, RTL, sticky, horizontal, sections. Deliberate — this is a primitive under evaluation, not a product.
