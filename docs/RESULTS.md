@@ -20,7 +20,7 @@ All numbers: same machine, real Chrome 151 (headed, `--remote-debugging-port`), 
 
 Estimate accuracy reduces jump *magnitude*, not *frequency* — compensation events are inherent to estimate-then-measure; only pipeline timing (sync) or re-derive anchoring eliminates them.
 
-**2026-08-24, @tanstack/react-virtual 3.14.6 → 3.14.10** (same scenario, astryx rows now 0.4.7): painted jump 11.1%, max **10px** — frequency persists as predicted above, but magnitude collapsed from 245px to the commanded step size (upstream compensation fixes landed on the 3.14.x patch track). The legend control re-measured identically (0.1% / 100px) across both astryx versions, so the shift is attributable to the library, not the corpus restyle. Perceptual (churn/pop) re-comparison on 3.14.10 has not been done.
+**2026-08-24, @tanstack/react-virtual 3.14.6 → 3.14.10** (same scenario, astryx rows now 0.4.7): painted jump 11.1%, max **10px** — frequency persists as predicted above, but magnitude collapsed from 245px to the commanded step size (upstream compensation fixes landed on the 3.14.x patch track). The legend control re-measured identically (0.1% / 100px) across both astryx versions, so the shift is attributable to the library, not the corpus restyle. Perceptual (churn/pop) re-comparison: see the dated paired round in section 2 — the felt class is fixed too.
 
 ### Streaming follow-at-bottom
 `?scenario=stream` — astryx Markdown rows, token chunks appended at 20–50 upd/s for 30s; metric = painted frames with pinErr > 4px.
