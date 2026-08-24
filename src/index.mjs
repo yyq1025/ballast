@@ -41,6 +41,15 @@ export function Ballast(props) {
     // vs "logic" instantly (see docs/RESULTS.md ablation).
     measureMode = 'ro',
     apiRef,
+    // ATTACH MODE. By default the list renders its own scroll container. Pass
+    // the caller's scroll element instead and it renders a bare fragment
+    // (spacers + windowed rows) into whatever container the caller already
+    // owns — the shape a design system needs, where the layout component owns
+    // the scroller and the virtualizer is one participant in it. Pass the
+    // ELEMENT, not a ref: a parent's ref attaches after its children's layout
+    // effects, so a ref would still read null on the commit that matters,
+    // while state holding the element re-renders with it available.
+    scrollElement,
     // How close to the bottom (px) a user scroll must land to re-engage
     // follow-at-end. This is the RE-ENGAGE condition only — disengaging is
     // upward movement past it. Default 24 follows ChatGPT's transcript, the
@@ -56,7 +65,9 @@ export function Ballast(props) {
     className,
   } = props
 
-  const scrollerRef = React.useRef(null)
+  const ownScrollerRef = React.useRef(null)
+  // Single accessor so every pass reads the live element in either mode.
+  const getScroller = () => scrollElement ?? ownScrollerRef.current
   const spacerTopRef = React.useRef(null)
   const spacerBottomRef = React.useRef(null)
   const rowEls = React.useRef(new Map()) // key -> element
@@ -126,7 +137,7 @@ export function Ballast(props) {
   const computeWindow = (el, desiredTop) => {
     const g = geo.current
     if (g.keys.length === 0) return { start: 0, end: -1 }
-    const top = desiredTop ?? el.scrollTop
+    const top = (desiredTop ?? el.scrollTop) - originRef.current
     const start = indexAt(Math.max(0, top - overscanTop))
     const end = indexAt(
       Math.min(Math.max(0, g.total - 1), top + el.clientHeight + overscanBottom),
@@ -162,32 +173,59 @@ export function Ballast(props) {
   // geometry, and the reverse: the anchor for whatever is at a scroll offset.
   const anchorAt = (scrollTop) => {
     const g = geo.current
-    const idx = indexAt(scrollTop)
+    const y = scrollTop - originRef.current
+    const idx = indexAt(y)
     return {
       kind: 'anchor',
       key: g.keys[idx],
-      viewportOffset: g.offsets[idx] - scrollTop,
+      viewportOffset: g.offsets[idx] - y,
     }
+  }
+
+  // Scroll offset at which our content starts. Zero when we own the scroller;
+  // in attach mode the caller's container can put padding, a header or a
+  // sticky region above us, and every offset in `geo` is relative to our first
+  // spacer rather than to the scroll box.
+  const originRef = React.useRef(0)
+  // Content the caller renders BELOW our fragment (in ChatLayout, the dock
+  // overflow: the scroller deliberately overflows by the composer height so
+  // the tail can scroll clear of it). End mode must scroll past it, or the
+  // last message parks underneath the overlay (measured: constant 174px).
+  const belowRef = React.useRef(0)
+  const measureOrigin = (el) => {
+    if (!scrollElement) return 0
+    const top = spacerTopRef.current
+    if (!top) return originRef.current
+    originRef.current =
+      top.getBoundingClientRect().top - el.getBoundingClientRect().top + el.scrollTop
+    belowRef.current = Math.max(
+      0,
+      el.scrollHeight - originRef.current - geo.current.total,
+    )
+    return originRef.current
   }
 
   // Desired scrollTop for a reference frame, clamped to the scrollable range.
   // null when the anchored row no longer exists in the data.
   const targetFor = (m, el) => {
     const g = geo.current
+    const origin = originRef.current
     let raw
-    if (m.kind === 'end') raw = g.total - el.clientHeight - m.distance
+    const below = belowRef.current
+    if (m.kind === 'end')
+      raw = origin + g.total + below - el.clientHeight - m.distance
     else {
       const idx = g.keys.indexOf(m.key)
       if (idx < 0) return null
-      raw = g.offsets[idx] - m.viewportOffset
+      raw = origin + g.offsets[idx] - m.viewportOffset
     }
-    return Math.max(0, Math.min(raw, g.total - el.clientHeight))
+    return Math.max(0, Math.min(raw, origin + g.total + below - el.clientHeight))
   }
 
   // The single correction pass: spacers(old geo) -> measure -> recompute ->
   // spacers(new geo) -> restore.
   const syncAndRestore = React.useCallback(() => {
-    const el = scrollerRef.current
+    const el = getScroller()
     if (!el) return
     const entryScrollTop = el.scrollTop
     // Phase 0 — spacers FIRST, from the pre-measure geometry: a window-shift
@@ -198,6 +236,7 @@ export function Ballast(props) {
     // making the spacers consistent BEFORE the first offsetHeight read
     // removes the collapse window entirely.
     writeSpacers(winRef.current)
+    measureOrigin(el)
     // Refresh the anchor from the LIVE scrollTop against the pre-measure
     // geometry (= what's currently painted). scroll events lag rAF-driven
     // scrolls by a frame; scrollTop itself is ground truth, so deriving the
@@ -293,12 +332,14 @@ export function Ballast(props) {
   // Initial landing: window over the tail (estimates only), then the main
   // layout effect measures and restores to the bottom.
   React.useLayoutEffect(() => {
-    const el = scrollerRef.current
+    const el = getScroller()
     if (!el) return
     recompute()
     setWindowIfChanged(computeWindow(el, geo.current.total - el.clientHeight))
+    // In attach mode the element arrives a render late (the caller holds it in
+    // state), so the landing keys off it rather than firing once at mount.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  }, [scrollElement])
 
   const measureModeRef = React.useRef(measureMode)
   measureModeRef.current = measureMode
@@ -358,7 +399,7 @@ export function Ballast(props) {
   }
 
   const onScroll = () => {
-    const el = scrollerRef.current
+    const el = getScroller()
     if (!el) return
     const isEcho =
       progTarget.current !== null &&
@@ -404,21 +445,38 @@ export function Ballast(props) {
     setWindowIfChanged(computeWindow(el))
   }
 
-  // Intent signals break convergence early: wheel/touchstart are USER INPUT,
-  // unlike scroll events (which mix in our own writes and clamps).
+  // The listener is attached once per scroll element but the handler is read
+  // live, so it never closes over a stale render's props.
+  const onScrollRef = React.useRef(onScroll)
+  onScrollRef.current = onScroll
+
+  // Listeners are attached imperatively rather than through JSX so both modes
+  // take the same path, and so attach mode can also turn OFF the browser's own
+  // scroll anchoring on a container it does not render: native anchoring picks
+  // its own anchor node and adjusts scrollTop underneath us, which is exactly
+  // the job this list is doing from its own reference frame.
   React.useEffect(() => {
-    const el = scrollerRef.current
+    const el = getScroller()
     if (!el) return
+    // Intent signals break convergence early: wheel/touchstart are USER INPUT,
+    // unlike scroll events (which mix in our own writes and clamps).
     const cancel = () => {
       converging.current = false
     }
+    const prevAnchor = el.style.overflowAnchor
+    el.style.overflowAnchor = 'none'
+    const scrollHandler = () => onScrollRef.current()
+    el.addEventListener('scroll', scrollHandler, { passive: true })
     el.addEventListener('wheel', cancel, { passive: true })
     el.addEventListener('touchstart', cancel, { passive: true })
     return () => {
+      el.style.overflowAnchor = prevAnchor
+      el.removeEventListener('scroll', scrollHandler)
       el.removeEventListener('wheel', cancel)
       el.removeEventListener('touchstart', cancel)
     }
-  }, [])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scrollElement])
 
   const rowRef = (key) => (el) => {
     if (el) {
@@ -450,11 +508,12 @@ export function Ballast(props) {
     h('div', { key: '__bottom', ref: spacerBottomRef, 'aria-hidden': true }),
   )
 
+  if (scrollElement) return h(React.Fragment, null, children)
+
   return h(
     'div',
     {
-      ref: scrollerRef,
-      onScroll,
+      ref: ownScrollerRef,
       className,
       style: {
         overflowY: 'auto',

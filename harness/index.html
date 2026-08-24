@@ -38,6 +38,8 @@ const params = new URLSearchParams(location.search)
 //   ?transition=1      wrap streaming setState in startTransition (emulates deferred rendering)
 //   ?smooth=1          followOnAppend: 'smooth'
 //   ?rate=20           chunk interval ms (default 35)
+//   ?list=chatlayout       astryx ChatLayout + ChatMessageList as shipped
+//                          (unvirtualized, their useChatStreamScroll follow)
 //   ?list=tanstack|astryx|legend|virtuoso
 //                          list strategy (astryx = ChatLayout, non-virtualized;
 //                          legend = @legendapp/list react entry, chat-first virtualizer;
@@ -122,7 +124,7 @@ if (LIST === 'legend') {
 // ?list=proto — local experimental virtualizer (proto-list.mjs): aggregate
 // spacers + bottom-distance bookkeeping + identity-anchor override
 let ProtoList = null
-if (LIST === 'proto') {
+if (LIST === 'proto' || (LIST === 'chatlayout' && params.get('virt') === '1')) {
   ;({ Ballast: ProtoList } = await import('../src/index.mjs'))
 }
 
@@ -1470,6 +1472,155 @@ function hud() {
     `PAINTED unpin <span class="${s.paintedUnpinned ? 'bad' : 'ok'}">${s.paintedUnpinned} (${s.paintedUnpinnedPct}%) max ${s.paintedMaxPinErrPx}px</span>${stats.done ? '\n— DONE —' : ''}`
 }
 
+// Streamed reply for the chatlayout arm — same shape as the STREAMING_TEXT
+// constant in astryx's ChatAutoScroll story: prose, a bulleted list, a fenced
+// block, so the height grows continuously and then jumps when a fence closes.
+const STREAM_TEXT = `Let me analyze the deployment failures for you. I'll start with the rollout timeline and then the failing health checks.
+
+Three services failed their post-deploy checks in the last hour:
+
+- \`api-gateway\` — readiness probe timed out after 30s, twice
+- \`billing\` — upstream latency exceeded the 1500ms budget
+- \`auth\` — token cache miss rate spiked to 40% after the config reload
+
+The common factor is the config reload that landed at 14:02. Here is the probe
+configuration that changed:
+
+\`\`\`yaml
+readinessProbe:
+  httpGet:
+    path: /healthz
+    port: 8080
+  initialDelaySeconds: 5
+  timeoutSeconds: 30
+\`\`\`
+
+Rolling back the reload restores all three services; the probe timeout is the
+proximate cause but the cache miss rate suggests the reload also invalidated
+warm state that the services assume across restarts.`
+
+// ---------- astryx ChatLayout arm (their own scroll machinery) ----------
+// The real product path: ChatLayout owns the scroll container and follow-at-end
+// (useChatStreamScroll — rAF spring, lock/unlock), ChatMessageList takes React
+// children. Nothing is virtualized; this is the baseline #4102 argues about,
+// measured at scale on the send -> stream -> follow loop a chat surface runs.
+// One row renderer for both halves of the comparison, so the only difference
+// between them is who decides which rows exist.
+function renderChatRow(m) {
+  return html`
+    <${Chat.ChatMessage} key=${m.id} sender=${m.sender}>
+      ${m.sender === 'user'
+        ? html`<${Chat.ChatMessageBubble}><${AstryxMarkdown}>${m.text}<//><//>`
+        : html`<${AstryxMarkdown}>${m.text}<//>`}
+    <//>
+  `
+}
+
+// ?virt=1 swaps ChatMessageList's children for the ballast virtualizer while
+// ChatLayout, the composer and the streaming driver stay identical. Caveat:
+// ballast brings its own scroll container, so ChatLayout's outer one stops
+// scrolling and its scroll button / useChatStreamScroll go inert — the arm
+// measures the LIST, not the integration. Resolving that ownership question is
+// exactly what a real primitive would have to answer.
+const VIRT = params.get('virt') === '1'
+
+// The integration shape: ChatLayout keeps its scroll container, and the
+// virtualizer ATTACHES to it through the layout's own published context
+// (useChatLayoutContext -> scrollContainerRef). Rows render into the layout's
+// content region as a bare fragment, so nothing nests a second scroller.
+function VirtualizedMessages({ messages }) {
+  const ctx = Chat.useChatLayoutContext()
+  const [scrollEl, setScrollEl] = React.useState(null)
+  // The layout's ref is populated during commit, after this child's effects,
+  // so read it on a passive effect and keep it in state.
+  React.useEffect(() => {
+    setScrollEl(ctx?.scrollContainerRef?.current ?? null)
+  }, [ctx])
+  return html`<${ProtoList}
+    scrollElement=${scrollEl}
+    measureMode=${params.get('measure') || 'ro'}
+    data=${messages}
+    keyExtractor=${(m) => m.id}
+    renderItem=${({ item }) => renderChatRow(item)}
+    estimatedItemSize=${120}
+  />`
+}
+
+function ChatLayoutApp() {
+  const [messages, setMessages] = React.useState(() =>
+    makeMessages(SIZE).map((text, i) => ({
+      id: `m-${i}`,
+      sender: i % 3 === 0 ? 'user' : 'assistant',
+      text,
+    })),
+  )
+  const streaming = React.useRef(false)
+  const [isStreaming, setIsStreaming] = React.useState(false)
+
+  // send -> append the prompt, then stream a reply in chunk by chunk.
+  const send = React.useCallback(() => {
+    if (streaming.current) return
+    streaming.current = true
+    setIsStreaming(true)
+    // Same streaming shape astryx's own ChatAutoScroll story uses: one text
+    // constant revealed by character slice, 2-5 chars per tick, so the arm
+    // exercises their auto-scroll exactly as their story does — the only axis
+    // that differs is how many messages are already in the list.
+    setMessages((prev) => [
+      ...prev,
+      { id: `u-${prev.length}`, sender: 'user', text: 'Summarize the deployment failures from the last hour.' },
+      { id: `a-${prev.length}`, sender: 'assistant', text: '' },
+    ])
+    let charIdx = 0
+    const timer = setInterval(() => {
+      charIdx += 2 + Math.floor(Math.random() * 4)
+      setMessages((prev) => {
+        const next = prev.slice()
+        const last = next[next.length - 1]
+        next[next.length - 1] = { ...last, text: STREAM_TEXT.slice(0, charIdx) }
+        return next
+      })
+      if (charIdx >= STREAM_TEXT.length) charIdx = 0
+    }, RATE)
+    setTimeout(() => {
+      clearInterval(timer)
+      streaming.current = false
+      setIsStreaming(false)
+      stats.done = true
+      console.log('[repro] FINAL', JSON.stringify(summarize()))
+    }, DUR)
+  }, [])
+
+  // Drive one send automatically so scripted runners measure the same path a
+  // user would take by hand.
+  React.useEffect(() => {
+    const t = setTimeout(send, 2500)
+    return () => clearTimeout(t)
+  }, [send])
+
+  useStreamMeasurement()
+
+  const composer = html`<${Chat.ChatComposer}>
+    <${Chat.ChatComposerInput} placeholder="Message" />
+    <${Chat.ChatSendButton} onClick=${send} />
+  <//>`
+
+  // ChatLayout scrolls the PAGE by default (its root has overflow visible and
+  // grows); their own stories constrain it with a fixed-height flex column, so
+  // the arm does the same or the measurement would be reading document scroll.
+  return html`
+    <div style=${{ height: '100vh', display: 'flex', flexDirection: 'column' }}>
+      <${Chat.ChatLayout} composer=${composer}>
+        ${VIRT
+          ? html`<${VirtualizedMessages} messages=${messages} />`
+          : html`<${Chat.ChatMessageList} isStreaming=${isStreaming}>
+              ${messages.map((m) => renderChatRow(m))}
+            <//>`}
+      <//>
+    </div>
+  `
+}
+
 // ---------- astryx lab LogStream arm ----------
 // Instruments THEIR follow logic, not ours. LogStream decides "the user
 // scrolled away" from the live distance to the bottom
@@ -1561,7 +1712,8 @@ if (SCENARIO === 'rest' || SCENARIO === 'reflow' || SCENARIO === 'scrollup') {
             : html`<${RestTanstack} messages=${msgs} items=${realItems} />`
   appTree = html`<div id="reflow-box" style=${{ width: '100%' }}>${inner}</div>`
 } else {
-  appTree = LIST === 'logstream' ? html`<${LogStreamApp} />`
+  appTree = LIST === 'chatlayout' ? html`<${ChatLayoutApp} />`
+    : LIST === 'logstream' ? html`<${LogStreamApp} />`
     : LIST === 'legend' ? html`<${LegendStreamApp} />`
     : LIST === 'virtuoso' ? html`<${VirtuosoStreamApp} />`
     : LIST === 'proto' ? html`<${ProtoStreamApp} />`

@@ -5,9 +5,9 @@
     "": {
       "name": "ballast",
       "devDependencies": {
-        "@astryxdesign/core": "0.4.7",
+        "@astryxdesign/core": "0.5.0",
         "@astryxdesign/lab": "0.5.0-canary.07f6c33",
-        "@astryxdesign/theme-neutral": "0.4.7",
+        "@astryxdesign/theme-neutral": "0.5.0",
         "@legendapp/list": "3.3.7",
         "@tanstack/react-virtual": "3.14.10",
         "@virtuoso.dev/message-list": "1.17.1",
@@ -23,11 +23,11 @@
     },
   },
   "packages": {
-    "@astryxdesign/core": ["@astryxdesign/core@0.4.7", "", { "dependencies": { "intl-messageformat": "^11.2.9" }, "peerDependencies": { "@stylexjs/stylex": "^0.19.0", "react": ">=19.0.0", "react-dom": ">=19.0.0" } }, "sha512-vlPnZFtyqip8R6t7iJk5W6TOB+ssd72jqHVW1g651dx+OwOqADcBZQo2TfDypxeMSU7roRIAMeV/01f+yXpbvQ=="],
+    "@astryxdesign/core": ["@astryxdesign/core@0.5.0", "", { "dependencies": { "intl-messageformat": "^11.2.9" }, "peerDependencies": { "@stylexjs/stylex": "^0.19.0", "react": ">=19.0.0", "react-dom": ">=19.0.0" } }, "sha512-O2lYXrU8+/iRNV9TqOHCj3zhz1NSJxdtytfoQ0Dy/TY7g2CjZTb4/zUpl0EA5hIi4Si1tJxlVf9Uh3LMVALnmg=="],
 
     "@astryxdesign/lab": ["@astryxdesign/lab@0.5.0-canary.07f6c33", "", { "dependencies": { "d3-array": "^3.2.4", "d3-scale": "^4.0.2", "d3-shape": "^3.2.0" }, "peerDependencies": { "@astryxdesign/core": "0.5.0-canary.07f6c33", "@stylexjs/stylex": ">=0.10.0", "react": ">=19.0.0", "react-dom": ">=19.0.0" } }, "sha512-pZabgSkp3u8ZL/J3xt0gLzHCVXOLOEdAYGj0/PEQUnIRV9/gHrkD2jJdoG2W8BntVNStMupbzk05tlY0cn0ZLg=="],
 
-    "@astryxdesign/theme-neutral": ["@astryxdesign/theme-neutral@0.4.7", "", { "dependencies": { "lucide-react": "^1.18.0" }, "peerDependencies": { "@astryxdesign/core": "0.4.7", "react": ">=19" } }, "sha512-mGxR7ck/1AeA4YkO+sYr+FogxhgmBtPGlEuSyOr2o/1M0X0YMQYjV4ND2ePLBak3JNEyH2/ETMXCSsK6bSjRGA=="],
+    "@astryxdesign/theme-neutral": ["@astryxdesign/theme-neutral@0.5.0", "", { "dependencies": { "lucide-react": "^1.18.0" }, "peerDependencies": { "@astryxdesign/core": "0.5.0", "react": ">=19" } }, "sha512-7EVMNJ3BCzq4lVyRzDQ9SLt0v03atQCpkXiE2BvdmH3B/nRVQvd+qfMBoUhL6EGsVTqnS3b+PSVU6unNcqulgQ=="],
 
     "@formatjs/fast-memoize": ["@formatjs/fast-memoize@3.1.7", "", {}, "sha512-zXfhLpvA6T7+efdt9JLbBwZ00tT7NsBMDVnDu8rpHeNNv8KfRZAMo2gkG0k9lK/Nzc//3kJ9pImsfuJxk3KhUA=="],
 
