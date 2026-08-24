@@ -9,7 +9,7 @@ An experimental virtualized list for React web, built for AI chat/feed transcrip
 Three ideas, each borrowed from a production system that independently converged on it, composed for the first time:
 
 1. **Aggregate top/bottom spacers** — rendered rows stay in normal document flow between two placeholder divs (the architecture Claude Desktop's in-house virtualizer uses). O(1) placeholder nodes; native-flow semantics for mounted rows.
-2. **Bottom-distance bookkeeping** — the desired position is stored as *px from the bottom edge* (the coordinate system ChatGPT's transcript uses). Above-viewport estimate→measured swaps and pinned tail growth are both identity operations in this frame, so the two most common disturbance classes in a chat workload need no compensation at all.
+2. **Bottom-distance bookkeeping** — the desired position is stored as *px from the bottom edge* (the coordinate system ChatGPT's transcript uses, where it comes free from a `column-reverse` scroller; here it is JS bookkeeping on a normal-flow container, which keeps native reading order, find-in-page and a11y sequence intact). Above-viewport estimate→measured swaps and pinned tail growth are both identity operations in this frame, so the two most common disturbance classes in a chat workload need no compensation at all.
 3. **Identity-anchor override** — while the user reads history, position is re-derived from an anchored row (the LegendList/mvcp philosophy). Corrections re-derive from a reference instead of accumulating deltas, so a single miss self-heals — the compensation-delta bug class (measured in two competitors) structurally cannot occur.
 
 Plus a **switchable measurement pipeline**, which the ablation below shows is the single most important knob in this design space:
@@ -26,6 +26,7 @@ Supporting machinery that the benchmarks forced into existence (each was a measu
 - **Entry/exit claim**: a correction pass snapshots scrollTop on entry and claims the exit value if it moved — a silent browser clamp during a transient layout inside the pass is machinery movement, and its scroll event must not read as a user scroll (measured: mid-stream mode hijack, 84% unpinned).
 - **Sticky echo**: k offset changes in one frame queue up to k scroll events dispatched across successive frames, each reading the same final scrollTop; a consume-once echo slot matches the first and misreads every duplicate as a user scroll. The expectation stays armed while events match; only a non-matching event clears it.
 - **Direction gate**: in end mode, a non-echo scroll event whose scrollTop did not decrease cannot be a user scrolling away from the bottom — it's tail growth, an external bottom write, or a clamp echo. Only upward movement flips to anchor mode (measured: boot-time hijack at 50 upd/s, 100% unpinned).
+- **Displacement-based disengage**: leaving follow-at-end is decided by how far the *user* has moved (accumulated across events, cleared when they move back), never by the live distance to the bottom — while following, the tail grows between corrections, so that distance carries machinery movement the user did not make. Measured: 6–24px nudges reading as 25–59px of distance, flipping to anchor and stranding the reader mid-stream. Re-engaging uses the absolute distance, which *is* honest in anchor mode because nothing is pulling the viewport. (ChatGPT can use absolute distance for both because its `column-reverse` container makes the browser maintain bottom-distance natively; a normal-flow list bookkeeping it in JS cannot.)
 
 ## Receipts (same corpus, same machine, real Chrome)
 
@@ -84,7 +85,7 @@ Both comparisons are against libraries measured in this repo's own harness, on t
 
 - `src/index.mjs` — the entire library. The harness imports this exact file (via import map), so the receipts always describe the shipped code.
 - `harness/` — the benchmark page: 6 list arms (ballast, LegendList, TanStack, virtua, Virtuoso ML, non-virtualized astryx control), 4 corpora incl. `mix=real` (calibrated from 182 real agent sessions) and `mix=wild` (extreme height variance), scenarios for stream-follow, scroll-up, reflow, and memory.
-- `bench/` — CDP runners: scripted scenarios (`bench.mjs`), touch-gesture replay (`wheelbench.mjs`), live hand-scroll instrumentation (`livemeasure.mjs`), long-jump fill (`jump.mjs`), and debugging probes.
+- `bench/` — CDP runners: scripted scenarios (`bench.mjs`), touch-gesture replay (`wheelbench.mjs`), live hand-scroll instrumentation (`livemeasure.mjs`), long-jump fill (`jump.mjs`), follow-semantics probes (`followprobe.mjs`, `nudgestorm.mjs`), and debugging probes.
 - `docs/RESULTS.md` — full numbers, methodology, and the two metric falsifications that led to the hand-feel suite.
 
 ## Running the harness

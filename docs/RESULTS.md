@@ -106,6 +106,15 @@ The first-mount backstop initially made streaming *catastrophically worse* (63�
 
 After all three: rate=20 (50 upd/s) 0.1–0.8% painted across five runs, zero flips; rate=35 0.5–1%; sync gear regression-clean (0% on scroll-up and stream). These holes were reachable in the pure-RO build too — the backstop merely made one of them near-deterministic at boot.
 
+### Follow-semantics (interaction axis, added 2026-08-24)
+`bench/followprobe.mjs` / `bench/nudgestorm.mjs` — inside an active stream, nudge the viewport up by less than `endThreshold` and check that follow-at-end survives.
+
+Adding a configurable `endThreshold` (default 24px, following ChatGPT's transcript; TanStack defaults to 1px, LegendList to 10% of the viewport) exposed a defect the whole scripted matrix was blind to: the disengage decision compared the *live distance to the bottom* against the threshold, and while following, the tail grows between corrections. Instrumented: 6–24px user nudges arriving as 25–59px of distance, flipping to anchor and stranding the reader mid-stream (2 of 12 samples with the old 4px threshold; 14 of 141 in a high-density storm). Same family as the three echo-model defects in section 3 — machinery movement contaminating a user-intent judgement.
+
+Fix: disengage on accumulated *user displacement* (cleared when the user moves back, so a slow persistent scroll-up still wins even when each step is erased by a re-pin); re-engage on absolute distance, which is honest in anchor mode because nothing is pulling the viewport. After: 28/28 single-nudge samples follow, storm disengages only past accumulated threshold, full scripted matrix unchanged.
+
+Architectural note: ChatGPT can use absolute distance for *both* transitions because its scroller is `flex flex-col-reverse` with `overflow-anchor: none` — the browser maintains bottom-distance natively (scrollTop is negative; the app calls `scrollTo({top: -distanceFromBottom})`), so pinned growth never inflates it. Its follow logic is nonetheless richer than a threshold: a directional intent machine (`away`/`toward`) with a 1000ms expiry, wheel-delta accumulation (with `deltaMode` line/page conversion) to judge where the user is *heading*, keyboard intent classification (PageUp/Home → away, Space → toward, Shift+Space → away), a 64px top-proximity trigger for loading older messages, and a stored `{distanceFromBottomPx, scrollHeightPx}` restore on any `scrollHeight` change.
+
 ## 4. Corpora
 
 - `mix=real` — calibrated from 182 real agent sessions: 70% folded tool groups, 10% user prompts (~420ch), 20% assistant prose (~490ch, 1/16 code fence, 1/10 table).

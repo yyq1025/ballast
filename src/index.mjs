@@ -22,6 +22,10 @@ import * as React from 'react'
 
 const h = React.createElement
 
+// "Did the declarative target land?" — a convergence tolerance, deliberately
+// NOT the same knob as `endThreshold` (which is a user-intent question).
+const CONVERGE_EPSILON_PX = 4
+
 export function Ballast(props) {
   const {
     data,
@@ -37,6 +41,15 @@ export function Ballast(props) {
     // vs "logic" instantly (see docs/RESULTS.md ablation).
     measureMode = 'ro',
     apiRef,
+    // How close to the bottom (px) a user scroll must land to re-engage
+    // follow-at-end. This is the RE-ENGAGE condition only — disengaging is
+    // upward movement past it. Default 24 follows ChatGPT's transcript, the
+    // one value in this space tuned on a production chat surface; TanStack
+    // defaults to 1px and LegendList to 10% of the viewport, so the useful
+    // range is wide. Too tight and a user who stops "visually at the bottom"
+    // (trackpad inertia, fractional row heights, page zoom) silently stops
+    // following while output grows below them.
+    endThreshold = 24,
     overscanTop = 1600,
     overscanBottom = 600,
     style,
@@ -56,9 +69,11 @@ export function Ballast(props) {
   // A time gate would swallow real user scrolls arriving within the window,
   // leaving a stale anchor that the next restore then fights (double-writer).
   const progTarget = React.useRef(null)
-  // Last scrollTop observed by a scroll event — direction gate for the
-  // end→anchor transition (see onScroll).
+  // Last scrollTop observed by a scroll event, and the px the user has moved
+  // away from where the machinery last placed them — the end→anchor decision
+  // runs on the latter (see onScroll).
   const lastEventST = React.useRef(null)
+  const userAway = React.useRef(0)
   const geoChanged = React.useRef(false)
   // Convergence protection (generalized from a one-shot landing flag):
   // whenever a declarative target is set (mount landing, or any imperative
@@ -246,7 +261,7 @@ export function Ballast(props) {
       Math.abs(
         el.scrollTop -
           Math.max(0, Math.min(target, g.total - el.clientHeight)),
-      ) <= 4
+      ) <= CONVERGE_EPSILON_PX
     ) {
       converging.current = false
     }
@@ -294,6 +309,8 @@ export function Ballast(props) {
 
   const measureModeRef = React.useRef(measureMode)
   measureModeRef.current = measureMode
+  const endThresholdRef = React.useRef(endThreshold)
+  endThresholdRef.current = endThreshold
 
   // In 'sync' mode the RO is only a backstop for out-of-commit size changes
   // (images, fonts). In 'ro' mode it IS the measurement pipeline: sizes come
@@ -346,26 +363,42 @@ export function Ballast(props) {
     // every duplicate as a user scroll. Keep the expectation while events
     // match; only a NON-matching event (a real user scroll) clears it.
     if (!isEcho) progTarget.current = null
-    const movedUp =
-      lastEventST.current !== null && el.scrollTop < lastEventST.current - 1
+    const prevEventST = lastEventST.current
     lastEventST.current = el.scrollTop
     if (!isEcho && !converging.current) {
       const g = geo.current
       const dist = el.scrollHeight - el.clientHeight - el.scrollTop
-      if (dist <= 4 || g.keys.length === 0) {
-        mode.current = { kind: 'end', distance: 0 }
-      } else if (mode.current.kind === 'anchor' || movedUp) {
+      const anchorHere = () => {
         const idx = indexAt(el.scrollTop)
         mode.current = {
           kind: 'anchor',
           key: g.keys[idx],
           viewportOffset: g.offsets[idx] - el.scrollTop,
         }
+        userAway.current = 0
       }
-      // else: END mode and scrollTop did not move up — a user cannot be
-      // scrolling away from the bottom without decreasing scrollTop, so this
-      // event is machinery (tail growth re-pins, external bottom writes,
-      // clamp echoes that slipped past the claims). Keep following.
+      if (g.keys.length === 0) {
+        mode.current = { kind: 'end', distance: 0 }
+        userAway.current = 0
+      } else if (mode.current.kind === 'end') {
+        // DISENGAGE is judged on the user's own displacement, never on the
+        // absolute distance to the bottom: while following, the tail grows
+        // between corrections, so the live distance carries machinery
+        // movement the user did not make (measured: 6-24px nudges reading as
+        // 25-59px, flipping to anchor and stranding the reader mid-stream).
+        // Accumulating means a slow, persistent upward scroll still wins even
+        // when each individual step is erased by a re-pin.
+        userAway.current = Math.max(0, userAway.current + (prevEventST === null ? 0 : prevEventST - el.scrollTop))
+        if (userAway.current > endThresholdRef.current) anchorHere()
+      } else if (dist <= endThresholdRef.current) {
+        // RE-ENGAGE is judged on the absolute distance, which IS honest in
+        // anchor mode: nothing is pulling the viewport, so reaching the
+        // bottom is the user's own doing.
+        mode.current = { kind: 'end', distance: 0 }
+        userAway.current = 0
+      } else {
+        anchorHere()
+      }
     }
     setWindowIfChanged(computeWindow(el))
   }

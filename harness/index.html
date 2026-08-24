@@ -68,6 +68,9 @@ const SIZE = Number(params.get('size') || 1000)
 const MIX = params.get('mix') || 'code'
 const EST = params.get('est') || null
 const STEP = Number(params.get('step') || 10)
+// ?dur=ms — stream scenario runtime (default 30s). Longer runs let interaction
+// probes take many samples inside one streaming window.
+const DUR = Number(params.get('dur') || 30000)
 const MD_MODE = params.get('plain') === '1' ? 'plain'
   : (params.get('md') || 'astryx')
 
@@ -314,7 +317,7 @@ function App() {
       clearInterval(chunkTimer); clearInterval(msgTimer)
       stats.done = true
       console.log('[repro] FINAL', JSON.stringify(summarize()))
-    }, 30000)
+    }, DUR)
     return () => { clearInterval(chunkTimer); clearInterval(msgTimer); clearTimeout(stopTimer) }
   }, [])
 
@@ -508,7 +511,7 @@ function LegendStreamApp() {
       clearInterval(chunkTimer); clearInterval(msgTimer)
       stats.done = true
       console.log('[repro] FINAL', JSON.stringify(summarize()))
-    }, 30000)
+    }, DUR)
     return () => { clearInterval(chunkTimer); clearInterval(msgTimer); clearTimeout(stopTimer) }
   }, [])
 
@@ -559,7 +562,7 @@ function ProtoStreamApp() {
       clearInterval(chunkTimer); clearInterval(msgTimer)
       stats.done = true
       console.log('[repro] FINAL', JSON.stringify(summarize()))
-    }, 30000)
+    }, DUR)
     return () => { clearInterval(chunkTimer); clearInterval(msgTimer); clearTimeout(stopTimer) }
   }, [])
 
@@ -609,7 +612,7 @@ function VirtuaStreamApp() {
       clearInterval(chunkTimer); clearInterval(msgTimer)
       stats.done = true
       console.log('[repro] FINAL', JSON.stringify(summarize()))
-    }, 30000)
+    }, DUR)
     return () => { clearInterval(chunkTimer); clearInterval(msgTimer); clearTimeout(stopTimer) }
   }, [])
 
@@ -732,7 +735,7 @@ function VirtuaPinApp() {
         pinMovedPct: +(100 * (stats.pinMoved || 0) / Math.max(1, stats.pinSamples || 0)).toFixed(1),
         pinMaxPx: stats.pinMaxPx || 0,
       }))
-    }, 30000)
+    }, DUR)
     return () => { clearInterval(chunkTimer); clearInterval(msgTimer); clearTimeout(stopTimer) }
   }, [])
 
@@ -813,7 +816,7 @@ function VirtuosoStreamApp() {
       clearInterval(chunkTimer); clearInterval(msgTimer)
       stats.done = true
       console.log('[repro] FINAL', JSON.stringify(summarize()))
-    }, 30000)
+    }, DUR)
     return () => { clearInterval(chunkTimer); clearInterval(msgTimer); clearTimeout(stopTimer) }
   }, [])
 
