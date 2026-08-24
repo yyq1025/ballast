@@ -1580,12 +1580,14 @@ function ChatLayoutApp() {
         next[next.length - 1] = { ...last, text: STREAM_TEXT.slice(0, charIdx) }
         return next
       })
-      if (charIdx >= STREAM_TEXT.length) charIdx = 0
+      if (charIdx >= STREAM_TEXT.length) {
+        clearInterval(timer)
+        streaming.current = false
+        setIsStreaming(false)
+      }
     }, RATE)
     setTimeout(() => {
       clearInterval(timer)
-      streaming.current = false
-      setIsStreaming(false)
       stats.done = true
       console.log('[repro] FINAL', JSON.stringify(summarize()))
     }, DUR)

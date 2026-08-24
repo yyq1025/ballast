@@ -139,9 +139,12 @@ export function Ballast(props) {
     if (g.keys.length === 0) return { start: 0, end: -1 }
     const top = (desiredTop ?? el.scrollTop) - originRef.current
     const start = indexAt(Math.max(0, top - overscanTop))
-    const end = indexAt(
-      Math.min(Math.max(0, g.total - 1), top + el.clientHeight + overscanBottom),
-    )
+    const bottomEdge = top + el.clientHeight + overscanBottom
+    // When the query reaches past the content, include the last row by
+    // construction instead of by binary search: a zero-height final row sits
+    // AT total, which the search (offsets[i] <= total - 1) can never select.
+    const end =
+      bottomEdge >= g.total ? g.keys.length - 1 : indexAt(bottomEdge)
     return { start, end }
   }
 
@@ -264,6 +267,13 @@ export function Ballast(props) {
     for (const [key, rowEl] of rowEls.current) {
       if (!remeasureAll && sizes.current.has(key)) continue
       const px = rowEl.offsetHeight
+      // Never record 0: a row measured while transiently EMPTY (a streaming
+      // reply's first commit) would otherwise pin offsets[last] == total,
+      // which no bottom-edge query can reach — the row is evicted from the
+      // window and, unmounted, can never be re-measured. Deadlock, measured:
+      // the streamed reply never rendered at all. Keeping the estimate keeps
+      // the row reachable until it has real height.
+      if (px === 0) continue
       if (sizes.current.get(key) !== px) {
         sizes.current.set(key, px)
         geoChanged.current = true
