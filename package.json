@@ -2,12 +2,32 @@
   "name": "ballast",
   "version": "0.0.0",
   "private": true,
-  "description": "Experimental virtualized list for React web — aggregate spacers, bottom-distance bookkeeping, identity-anchor override, switchable measurement pipeline",
+  "description": "Experimental virtualized list for React web \u2014 aggregate spacers, bottom-distance bookkeeping, identity-anchor override, switchable measurement pipeline",
   "type": "module",
   "main": "src/index.mjs",
-  "exports": { ".": "./src/index.mjs" },
+  "exports": {
+    ".": "./src/index.mjs"
+  },
   "license": "MIT",
   "author": "Yueqian Yang",
-  "peerDependencies": { "react": ">=18" },
-  "scripts": { "harness": "node harness/server.mjs" }
+  "peerDependencies": {
+    "react": ">=18"
+  },
+  "scripts": {
+    "harness": "node harness/server.mjs",
+    "vendor": "node scripts/vendor.mjs"
+  },
+  "devDependencies": {
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "htm": "^3.1.1",
+    "@tanstack/react-virtual": "3.14.6",
+    "@legendapp/list": "3.3.7",
+    "virtua": "0.50.4",
+    "@virtuoso.dev/message-list": "1.17.1",
+    "@astryxdesign/core": "0.1.6",
+    "@astryxdesign/theme-neutral": "0.1.6",
+    "streamdown": "2.5.0",
+    "esbuild": "^0.25.0"
+  }
 }
