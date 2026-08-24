@@ -10,7 +10,8 @@ All numbers: same machine, real Chrome 151 (headed, `--remote-debugging-port`), 
 | arm (mix=real, 1000 rows, step=10) | painted jump | max | blank strip |
 |---|---|---|---|
 | ballast sync | 0% | 0 | 0% |
-| ballast ro | 20.9% | 175px | 0% |
+| ballast ro (first-mount backstop) | 0% | 0 | 0% |
+| ballast pure-RO (pre-fix) | 20.9% | 175px | 0% |
 | LegendList web | 0.1% | 100px (1 frame) | 0% |
 | TanStack (est=60 default) | 14.4% | 245px | — |
 | TanStack (est=40) | 20.8% | 265px | — |
@@ -25,7 +26,8 @@ Estimate accuracy reduces jump *magnitude*, not *frequency* — compensation eve
 | arm | rate=35 (29 upd/s) | rate=20 (50 upd/s) |
 |---|---|---|
 | ballast sync | 0% (0 pre-paint too) | 0% |
-| ballast ro | 0.8% / max 110px | 0.6% |
+| ballast ro (first-mount backstop) | 1% / max 41px | 0.1% / max 21px |
+| ballast pure-RO (pre-fix) | 0.8% / max 110px | 0.6% |
 | LegendList web | 1.5% | 1.6–3.3% |
 | TanStack | 0.5% | — |
 | Virtuoso ML | 31.5% (monotonic lag) | **jump-to-top bug**: viewport thrown to transcript top, unrecovered; 2/2 runs @40 upd/s, mechanism = compensation `scrollTop += a` with a ≈ −(tall streaming item height) |
@@ -34,7 +36,11 @@ Estimate accuracy reduces jump *magnitude*, not *frequency* — compensation eve
 | virtua official pin pattern | pinned prompt row: 0% movement (after excluding smooth-scroll animation windows) | 0% |
 
 ### Pipeline ablation (the key experiment)
-Same 300 lines, one switch: sync (forced-layout measurement in commit) vs ro (ResizeObserver only). Scroll-up painted jumps went 0% → 20.9% (≈ TanStack's numbers); streaming went 0% → 0.6–0.8% (still first-tier). Conclusion: the scroll-up axis advantage is bought by measurement timing; the streaming advantage is structural (same-task measure+restore has no observable window). RO-mode painted artifacts on scroll-up trace to ResizeObserver loop-depth semantics: corrections made inside an RO callback (spacer heights + scrollTop) defer the resulting observations to the next frame.
+Same 300 lines, one switch: sync (forced-layout measurement in commit) vs pure ro (ResizeObserver only). Scroll-up painted jumps went 0% → 20.9% (≈ TanStack's numbers); streaming went 0% → 0.6–0.8% (still first-tier). The streaming advantage is structural (same-task measure+restore has no observable window).
+
+The original attribution of the scroll-up deficit — "ResizeObserver loop-depth semantics defer corrections to the next frame" — was **falsified** by two follow-up experiments: wrapping the RO-callback correction in `flushSync` changed nothing (22.2% vs 20.8% baseline), and refreshing the anchor from DOM truth inside the RO callback *worsened* the high-variance corpus 4.5× (mixing DOM-space `viewportOffset` with geo-space restore double-counts the estimate error). The real mechanism is specific to document flow: **an unmeasured row paints at its real height while the geometry still carries its estimate**, displacing everything below it (the whole viewport) by (real − est) for one frame, then snapping back when RO delivers — 2 painted artifact frames per mount, and the arithmetic closes exactly (98 geometry revisions × 2 = 196 ≈ 197 measured jump frames). Absolute-positioning designs don't have this class: their fresh rows land at estimated `translateY` without pushing neighbors.
+
+The fix — measure a row synchronously **once, in its mount commit** (`offsetHeight`; growth and reflow stay on RO; steady-state commits do no forced layout) — took the axis to 0% on both corpora and cut flick reversals from 2.1% / 1513px to 0.7–0.9% / 473px. Residual: 6.4% / 262px with deliberately broken estimates (est=40), mechanism not yet isolated.
 
 ### Landing / long jump
 `scrollToDistanceFromBottomPx(0)` is a declaration (re-point the reference frame, converge), not a scroll action — the window is computed from the desired bottom first, so the destination renders before the position lands. Measured: landing at frame 0, 0 blank frames; a naive `el.scrollTop = el.scrollHeight` write is *also* clean here, because the scroll handler converges synchronously before that frame's paint. Blank-flash on long jumps (observed in Claude Desktop's virtualizer) requires multi-frame traversal, i.e. smooth easing across unmounted regions — not implemented, deliberately.
@@ -54,7 +60,8 @@ Viewport-space metrics: reversal = content moving against input direction; spike
 |---|---|---|---|
 | astryx non-virtualized (control) | 0% | 0 | 19,075px |
 | ballast sync | 0% | 0 | 7,986px |
-| ballast ro | 2.1% | 1,513px | 10,029px |
+| ballast ro (first-mount backstop) | 0.7–0.9% | 473px | ~8,000px |
+| ballast pure-RO (pre-fix) | 2.1% | 1,513px | 10,029px |
 | LegendList | 0% | 0 | 6,813px |
 | TanStack | 1.3% | 728px | 6,187px |
 
@@ -77,12 +84,22 @@ The three metrics that finally matched perception:
 
 Methodology notes: an earlier uncontrolled round produced *inverted* results (ballast-ro looked worse) because the two pages had different warm/cold measurement histories from prior hand testing — equal-cold reloads are mandatory. Time-boxed sampling windows cannot catch a human subject (turn-based interaction); persistent samplers read on demand are the workable design.
 
-## 3. Corpora
+## 3. The echo-model bug family (found while landing the first-mount backstop)
+
+The first-mount backstop initially made streaming *catastrophically worse* (63–84% painted unpin vs 0.4% baseline), which exposed three latent holes in programmatic-scroll discrimination. Each was located by instrumenting the full scroll-event stream around the first failure (`{t, scrollTop, progTarget, echo?}` merged with write/claim logs), not by inspection — every prior mechanism guess for these had been wrong.
+
+1. **Silent clamps are unclaimed machinery movement.** A window-shift commit's transient layout can shrink content; the browser clamps scrollTop with no write of ours involved. The clamp's scroll event carries a value the echo slot never saw → misread as a user scroll → mode hijacked mid-stream, permanently (measured: est-120 row replaced by its 41.5px measured size → −78.5px clamp → 84% unpinned). Fix: a correction pass snapshots scrollTop at entry and **claims the exit value if it moved** — by write or by clamp. (User input cannot move scrollTop inside synchronous JS; compositor scrolls land at frame boundaries.)
+2. **Scroll events duplicate under multi-change frames.** k offset changes within one frame queue up to k scroll events, dispatched across successive frames, **each reading the same final scrollTop**. A consume-once echo slot matches the first and misreads every duplicate as a user scroll (trace: `WRITE 7072.5 → CLAIM 6994 → SCROLL 6994 echo ✓ → SCROLL 6994 again, slot empty → hijack`). Fix: **sticky echo** — the expectation stays armed while events match; only a non-matching event clears it.
+3. **Intent has a direction.** At 50 upd/s boot, external bottom-pins interleaved with growth produce non-echo events whose dist-from-bottom exceeds the threshold, misread as "user scrolled up 651px" (measured: 100% unpinned, one flip at t=190ms). Fix: **direction gate** — in end mode, a non-echo event whose scrollTop did not decrease cannot be a user scrolling away from the bottom; only upward movement flips to anchor.
+
+After all three: rate=20 (50 upd/s) 0.1–0.8% painted across five runs, zero flips; rate=35 0.5–1%; sync gear regression-clean (0% on scroll-up and stream). These holes were reachable in the pure-RO build too — the backstop merely made one of them near-deterministic at boot.
+
+## 4. Corpora
 
 - `mix=real` — calibrated from 182 real agent sessions: 70% folded tool groups, 10% user prompts (~420ch), 20% assistant prose (~490ch, 1/16 code fence, 1/10 table).
 - `mix=wild` — extreme variance: 40% tiny (single tool call), 30% medium, 20% large, 10% huge (multi-section + fences + table, 2–4k px). Designed to maximize per-row estimate error.
 
-## 4. Ecosystem measurement notes
+## 5. Ecosystem measurement notes
 
 - LegendList web ships **no real-browser tests** (jsdom + mocked geometry only) — the artifact classes measured here are structurally invisible to its CI. Its quality is design-carried, and holds: 0% on every gesture metric.
 - All four web libraries (TanStack, LegendList, virtua, react-virtuoso) are RO-timing-class; none measures synchronously in the commit. virtuoso is a hybrid (container-RO trigger + offsetHeight batch harvest, with an optional rAF deferral path).

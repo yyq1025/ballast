@@ -15,7 +15,7 @@ Three ideas, each borrowed from a production system that independently converged
 Plus a **switchable measurement pipeline**, which the ablation below shows is the single most important knob in this design space:
 
 - `measureMode: 'sync'` — forced-layout measurement inside the commit's layout effect. Corrections are atomic with the content change; zero observable transients. Costs a forced synchronous layout per commit — affordable for chat-sized windows (~20 rows, 57fps held), the classic thrashing risk for large/heavy pages.
-- `measureMode: 'ro'` — ResizeObserver-only measurement, no forced layout anywhere. The industry-standard timing (TanStack, LegendList, virtua, virtuoso are all in this class), with the industry-standard transient window.
+- `measureMode: 'ro'` — ResizeObserver measurement, plus a **first-mount sync backstop**: a row whose size was never measured is read once (`offsetHeight`) in its mount commit. In document flow an unmeasured row paints at its real height while the geometry still carries its estimate, displacing the whole viewport by (real − est) for a frame — an artifact class absolute-positioning designs don't have, and the entire pure-RO scroll-up deficit (20.9% → 0% measured). Growth and reflow of already-measured rows stay on the RO pipeline; steady-state commits do no forced layout.
 
 Supporting machinery that the benchmarks forced into existence (each was a measured failure first):
 
@@ -23,6 +23,9 @@ Supporting machinery that the benchmarks forced into existence (each was a measu
 - **Live-anchor refresh** at correction time (scroll events lag rAF scrolls by a frame; 11.3% residual before the fix).
 - **Convergence protection** (`converging`): declarative targets (mount landing, `scrollToDistanceFromBottomPx`) are protected from mode-flips until reached; only intent signals (wheel/touchstart) break in early. Without it, a transient clamp mid-bootstrap reads as a user scroll and anchors the list mid-flight (measured: full freeze).
 - **Phase-0 spacer writes** before any forced layout read, killing the transient-collapse → browser-clamp window on window-shift commits.
+- **Entry/exit claim**: a correction pass snapshots scrollTop on entry and claims the exit value if it moved — a silent browser clamp during a transient layout inside the pass is machinery movement, and its scroll event must not read as a user scroll (measured: mid-stream mode hijack, 84% unpinned).
+- **Sticky echo**: k offset changes in one frame queue up to k scroll events dispatched across successive frames, each reading the same final scrollTop; a consume-once echo slot matches the first and misreads every duplicate as a user scroll. The expectation stays armed while events match; only a non-matching event clears it.
+- **Direction gate**: in end mode, a non-echo scroll event whose scrollTop did not decrease cannot be a user scrolling away from the bottom — it's tail growth, an external bottom write, or a clamp echo. Only upward movement flips to anchor mode (measured: boot-time hijack at 50 upd/s, 100% unpinned).
 
 ## Receipts (same corpus, same machine, real Chrome)
 
@@ -30,26 +33,30 @@ Scripted axes — painted (user-visible) artifact frames:
 
 | Axis | ballast sync | ballast ro | LegendList web | TanStack | Virtuoso ML |
 |---|---|---|---|---|---|
-| Scroll-up cold history (10px/f) | **0%** | 20.9% | 0.1% | 14.4% | 0% |
-| Scroll-up, bad estimates (est=40) | **0%** | 16.3% | — | 20.8% | — |
+| Scroll-up cold history (10px/f) | **0%** | **0%** | 0.1% | 14.4% | 0% |
+| Scroll-up, bad estimates (est=40) | **0%** | 6.4% | — | 20.8% | — |
 | Fast-scroll blank strip (60px/f) | **0%** | 0% | 0% | — | 67% |
-| Stream follow 29 upd/s | **0%** | 0.8% | 1.5% | 0.5% | 31.5% |
-| Stream follow 50 upd/s | **0%** | 0.6% | 1.6–3.3% | — | jump-to-top bug |
+| Stream follow 29 upd/s | **0%** | 1% / max 41px | 1.5% | 0.5% | 31.5% |
+| Stream follow 50 upd/s | **0%** | 0.1% | 1.6–3.3% | — | jump-to-top bug |
 | Long jump to bottom (blank frames) | **0** | — | — | — | — |
+
+(ro-gear numbers include the first-mount sync backstop; the pure-RO ablation numbers it replaced — 20.9% / 16.3% / 0.8% — are preserved in `docs/RESULTS.md`.)
 
 Gesture axes (CDP touch gestures / real human hand, `wild` high-variance corpus):
 
 | Axis | ballast sync | ballast ro | LegendList | TanStack |
 |---|---|---|---|---|
-| Flick+fling content reversal | **0%** | 2.1% (debt, see below) | 0% | 1.3% |
-| Hand slow-scroll: scrollTop churn (programmatic / finger input) | — | **≈1:1** | — | **13:1** |
-| Hand slow-scroll: top-region pop rate | — | 2.4%, all 1-frame | — | 4.6%, up to 2-frame |
+| Flick+fling content reversal | **0%** | 0.7–0.9% / max 473px (was 2.1% / 1513px pre-fix) | 0% | 1.3% / 728px |
+| Hand slow-scroll: scrollTop churn (programmatic / finger input) | — | **≈1:1** † | — | **13:1** |
+| Hand slow-scroll: top-region pop rate | — | 2.4%, all 1-frame † | — | 4.6%, up to 2-frame |
+
+† collected on the pre-fix pure-RO build; re-collection on the fixed build pending.
 
 The hand-feel metrics (churn ratio, entering-region pop rate, pop persistence) are, to our knowledge, novel — scripted constant-step scrolling, CDP wheel events (smoothing-masked), and CDP touch drags (JS writes stomped mid-drag) all fail to reproduce what a human hand feels; the derivation is in `docs/RESULTS.md`.
 
 ## Known debts (honest list)
 
-- **RO-mode same-frame correction discipline**: under fast flicks, RO-mode reversals reach 1.5k px — worse than TanStack on that axis. The fix class is known (keeping corrections inside the frame despite ResizeObserver loop-depth deferral); estimated 300–500 lines. Until then: sync mode for chat-sized windows, RO mode acceptable for slow-scroll-dominant workloads.
+- **RO-gear residuals**: flick reversals 0.7–0.9% / max 473px (better than TanStack's 1.3% / 728px, not zero), and 6.4% / max 262px on the deliberately-broken-estimates axis (est=40) with the mechanism not yet isolated. The previous version of this entry estimated the RO deficit fix at 300–500 lines of "same-frame correction discipline" — falsified: the measured fix was ~40 lines (first-mount sync backstop + entry/exit claim + sticky echo + direction gate; derivation in `docs/RESULTS.md`).
 - **Chromium-only**: zero Safari/Firefox verification. virtua's e2e suite (Playwright, real WebKit, per-browser tolerances) is the porting reference.
 - **No a11y yet**: document flow makes the Rocksteady/ChatGPT a11y patterns (aria-posinset on flow rows, focus return) cheap to add, but none are implemented.
 - **Feature surface is minimal**: no recycling, RTL, sticky, horizontal, sections. Deliberate — this is a primitive under evaluation, not a product.

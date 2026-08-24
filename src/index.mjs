@@ -53,6 +53,9 @@ export function Ballast(props) {
   // A time gate would swallow real user scrolls arriving within the window,
   // leaving a stale anchor that the next restore then fights (double-writer).
   const progTarget = React.useRef(null)
+  // Last scrollTop observed by a scroll event — direction gate for the
+  // end→anchor transition (see onScroll).
+  const lastEventST = React.useRef(null)
   const geoChanged = React.useRef(false)
   // Convergence protection (generalized from a one-shot landing flag):
   // whenever a declarative target is set (mount landing, or any imperative
@@ -139,6 +142,7 @@ export function Ballast(props) {
   const syncAndRestore = React.useCallback(() => {
     const el = scrollerRef.current
     if (!el) return
+    const entryScrollTop = el.scrollTop
     // Phase 0 — spacers FIRST, from the pre-measure geometry: a window-shift
     // commit swaps rows before the layout effect runs, so without this the
     // first forced layout below sees new rows + stale spacers, the content
@@ -169,6 +173,22 @@ export function Ballast(props) {
         const px = rowEl.offsetHeight
         if (sizes.current.get(key) !== px) {
           sizes.current.set(key, px)
+          geoChanged.current = true
+        }
+      }
+    } else {
+      // First-mount sync backstop: an UNMEASURED row is about to paint at its
+      // real height while the geometry still carries its estimate. In
+      // document flow that displaces everything below it (the whole viewport)
+      // by (real - est) for one frame, then snaps back when RO delivers — a
+      // 2-painted-frame artifact per mount that absolute-positioning designs
+      // don't have. Measuring ONCE at mount closes it; growth and reflow of
+      // already-measured rows stay on the RO pipeline (no per-commit forced
+      // layout in steady state — this branch reads only when a fresh row
+      // mounted this commit).
+      for (const [key, rowEl] of rowEls.current) {
+        if (!sizes.current.has(key)) {
+          sizes.current.set(key, rowEl.offsetHeight)
           geoChanged.current = true
         }
       }
@@ -235,6 +255,16 @@ export function Ballast(props) {
         ? geo.current.total - el.clientHeight - mode.current.distance
         : el.scrollTop
     setWindowIfChanged(computeWindow(el, desiredTop))
+    // Entry/exit claim: if scrollTop moved during this pass — by our write OR
+    // by a SILENT BROWSER CLAMP during a transient layout (spacers not yet
+    // caught up with a window shift, an estimate replaced by a smaller
+    // measured size) — the movement is machinery-induced, and the coalesced
+    // scroll event that dispatches next frame will carry the CURRENT value.
+    // Claim it, or that event is misread as a user scroll and hijacks the
+    // mode. User input cannot move scrollTop inside synchronous JS
+    // (compositor scrolls land at frame boundaries), so this never swallows
+    // a real gesture.
+    if (el.scrollTop !== entryScrollTop) progTarget.current = el.scrollTop
   }, [recompute])
 
   // Data identity change (append / chunk growth) also invalidates geometry.
@@ -307,13 +337,21 @@ export function Ballast(props) {
     const isEcho =
       progTarget.current !== null &&
       Math.abs(el.scrollTop - progTarget.current) <= 1
-    if (isEcho) progTarget.current = null
-    else if (!converging.current) {
+    // STICKY echo: k offset changes within one frame queue up to k scroll
+    // events, dispatched across successive frames, EACH reading the same
+    // final scrollTop. A consume-once slot matches the first and misreads
+    // every duplicate as a user scroll. Keep the expectation while events
+    // match; only a NON-matching event (a real user scroll) clears it.
+    if (!isEcho) progTarget.current = null
+    const movedUp =
+      lastEventST.current !== null && el.scrollTop < lastEventST.current - 1
+    lastEventST.current = el.scrollTop
+    if (!isEcho && !converging.current) {
       const g = geo.current
       const dist = el.scrollHeight - el.clientHeight - el.scrollTop
       if (dist <= 4 || g.keys.length === 0) {
         mode.current = { kind: 'end', distance: 0 }
-      } else {
+      } else if (mode.current.kind === 'anchor' || movedUp) {
         const idx = indexAt(el.scrollTop)
         mode.current = {
           kind: 'anchor',
@@ -321,6 +359,10 @@ export function Ballast(props) {
           viewportOffset: g.offsets[idx] - el.scrollTop,
         }
       }
+      // else: END mode and scrollTop did not move up — a user cannot be
+      // scrolling away from the bottom without decreasing scrollTop, so this
+      // event is machinery (tail growth re-pins, external bottom writes,
+      // clamp echoes that slipped past the claims). Keep following.
     }
     setWindowIfChanged(computeWindow(el))
   }
