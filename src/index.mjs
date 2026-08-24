@@ -178,7 +178,15 @@ export function Ballast(props) {
     // geometry (= what's currently painted). scroll events lag rAF-driven
     // scrolls by a frame; scrollTop itself is ground truth, so deriving the
     // anchor here removes that staleness class entirely.
-    if (mode.current.kind === 'anchor' && geo.current.keys.length > 0) {
+    if (
+      mode.current.kind === 'anchor' &&
+      // ...but NOT while converging: then the anchor is a DECLARATION (an
+      // imperative anchorToKey), and re-deriving it from the live scrollTop
+      // would immediately overwrite the destination with wherever we happen
+      // to be standing — the same protection end-mode targets already get.
+      !converging.current &&
+      geo.current.keys.length > 0
+    ) {
       const idx = indexAt(el.scrollTop)
       mode.current = {
         kind: 'anchor',
@@ -265,14 +273,11 @@ export function Ballast(props) {
     ) {
       converging.current = false
     }
-    // In end mode the window must cover the DESIRED bottom, not the stale
-    // scrollTop — otherwise a newly appended tail row never enters the
-    // window and its growth is invisible to the geometry.
-    const desiredTop =
-      mode.current.kind === 'end'
-        ? geo.current.total - el.clientHeight - mode.current.distance
-        : el.scrollTop
-    setWindowIfChanged(computeWindow(el, desiredTop))
+    // The window must cover the DESIRED position, not the stale scrollTop:
+    // in end mode a newly appended tail row would otherwise never enter the
+    // window and its growth stay invisible to the geometry; for a declared
+    // anchor it is what renders the destination before the position lands.
+    setWindowIfChanged(computeWindow(el, target === null ? el.scrollTop : target))
     // Entry/exit claim: if scrollTop moved during this pass — by our write OR
     // by a SILENT BROWSER CLAMP during a transient layout (spacers not yet
     // caught up with a window shift, an estimate replaced by a smaller
@@ -344,6 +349,19 @@ export function Ballast(props) {
     apiRef.current = {
       scrollToDistanceFromBottomPx: (px = 0) => {
         mode.current = { kind: 'end', distance: px }
+        converging.current = true
+        geoChanged.current = true
+        syncAndRestore()
+      },
+      // Hold one row at a fixed viewport offset (0 = its top edge at the
+      // viewport top — the "pin the new prompt to the top" pattern). Same
+      // declaration semantics; the reference frame just becomes a row
+      // identity instead of the bottom edge, so rows resizing above it are
+      // absorbed. Note the position still clamps to the scrollable range:
+      // pinning a row near the end needs reserved space below it, which
+      // this primitive does not provide yet.
+      anchorToKey: (key, viewportOffset = 0) => {
+        mode.current = { kind: 'anchor', key, viewportOffset }
         converging.current = true
         geoChanged.current = true
         syncAndRestore()

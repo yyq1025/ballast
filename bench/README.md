@@ -24,6 +24,7 @@ use a real, visible Chrome window.
 ## Interaction probes
 
 - `followprobe.mjs` — inside an active stream, nudge the viewport up by less than `endThreshold` and verify follow-at-end survives; reports pass/fail per sample.
+- `anchorprobe.mjs` — imperative `anchorToKey` long jumps: blank frames, frames-to-land, final offset.
 - `nudgestorm.mjs` — ~140 sub-threshold nudges at varied frame phases in one stream, reporting every disengage decision with the state that caused it.
 
 Both need `scenario=stream` plus a long `dur` (e.g. `&dur=120000`) so all samples land inside one streaming window; sampling after the stream ends measures a static list and reads as false failures.
