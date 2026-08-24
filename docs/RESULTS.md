@@ -1,6 +1,6 @@
 # Benchmark results & methodology
 
-All numbers: same machine, real Chrome 151 (headed, `--remote-debugging-port`), same corpus per comparison. Dual sampling everywhere: rAF = pre-paint upper bound, rAF+setTimeout(0) = painted truth (what the eye can see). Library versions: @legendapp/list 3.3.7, @tanstack/react-virtual 3.14.x, virtua 0.50.4, @virtuoso.dev/message-list 1.17.1 (localhost evaluation per its EULA).
+All numbers: same machine, real Chrome 151 (headed, `--remote-debugging-port`), same corpus per comparison. Dual sampling everywhere: rAF = pre-paint upper bound, rAF+setTimeout(0) = painted truth (what the eye can see). Library versions: @legendapp/list 3.3.7, @tanstack/react-virtual 3.14.6 (see the dated 3.14.10 note under the scroll-up table), virtua 0.50.4, @virtuoso.dev/message-list 1.17.1 (localhost evaluation per its EULA), @astryxdesign 0.1.6 for rows/control (0.4.7 after 2026-08-24).
 
 ## 1. Scripted axes
 
@@ -19,6 +19,8 @@ All numbers: same machine, real Chrome 151 (headed, `--remote-debugging-port`), 
 | Virtuoso ML | 0% | 0 | 67% @step60 (default overscan 0; increaseViewportBy=300 fixes) |
 
 Estimate accuracy reduces jump *magnitude*, not *frequency* — compensation events are inherent to estimate-then-measure; only pipeline timing (sync) or re-derive anchoring eliminates them.
+
+**2026-08-24, @tanstack/react-virtual 3.14.6 → 3.14.10** (same scenario, astryx rows now 0.4.7): painted jump 11.1%, max **10px** — frequency persists as predicted above, but magnitude collapsed from 245px to the commanded step size (upstream compensation fixes landed on the 3.14.x patch track). The legend control re-measured identically (0.1% / 100px) across both astryx versions, so the shift is attributable to the library, not the corpus restyle. Perceptual (churn/pop) re-comparison on 3.14.10 has not been done.
 
 ### Streaming follow-at-bottom
 `?scenario=stream` — astryx Markdown rows, token chunks appended at 20–50 upd/s for 30s; metric = painted frames with pinErr > 4px.

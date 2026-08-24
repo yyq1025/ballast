@@ -40,7 +40,7 @@ Scripted axes — painted (user-visible) artifact frames:
 | Stream follow 50 upd/s | **0%** | 0.1% | 1.6–3.3% | — | jump-to-top bug |
 | Long jump to bottom (blank frames) | **0** | — | — | — | — |
 
-(ro-gear numbers include the first-mount sync backstop; the pure-RO ablation numbers it replaced — 20.9% / 16.3% / 0.8% — are preserved in `docs/RESULTS.md`.)
+(ro-gear numbers include the first-mount sync backstop; the pure-RO ablation numbers it replaced — 20.9% / 16.3% / 0.8% — are preserved in `docs/RESULTS.md`. TanStack column measured on 3.14.6; on 3.14.10 the scroll-up cell re-measures at 11.1% with max jump collapsed to 10px — upstream fixes landed; dated note in RESULTS.)
 
 Gesture axes (CDP touch gestures / real human hand, `wild` high-variance corpus):
 

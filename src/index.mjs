@@ -28,11 +28,14 @@ export function Ballast(props) {
     keyExtractor,
     renderItem,
     estimatedItemSize = 120,
-    // 'sync' = forced-layout measurement in the commit's layout effect
-    // (zero-window corrections, pays sync layout); 'ro' = sizes come from
-    // ResizeObserver callbacks only (no forced layout, corrections land
-    // post-layout pre-paint — the TanStack/LegendList timing class).
-    measureMode = 'sync',
+    // 'ro' (default, the shipping gear) = sizes come from ResizeObserver
+    // callbacks plus a one-shot sync read at first mount; steady-state
+    // commits do no forced layout. 'sync' = forced-layout measurement in
+    // EVERY commit's layout effect — zero-window corrections, pays a sync
+    // layout per commit. Kept as the experimental control arm: same code,
+    // one switch, so any residual artifact bisects into "pipeline timing"
+    // vs "logic" instantly (see docs/RESULTS.md ablation).
+    measureMode = 'ro',
     apiRef,
     overscanTop = 1600,
     overscanBottom = 600,

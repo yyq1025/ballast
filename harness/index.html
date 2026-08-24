@@ -38,7 +38,7 @@ const params = new URLSearchParams(location.search)
 //   ?transition=1      wrap streaming setState in startTransition (emulates deferred rendering)
 //   ?smooth=1          followOnAppend: 'smooth'
 //   ?rate=20           chunk interval ms (default 35)
-//   ?md=marked|plain|streamdown   markdown renderer (default marked — Codex's real stack;
+//   ?md=astryx|plain|streamdown   markdown renderer (default astryx — every receipt's stack;
 //                                 streamdown@2.5.0 hard-freezes the renderer on this workload)
 //   ?list=tanstack|astryx|legend|virtuoso
 //                          list strategy (astryx = ChatLayout, non-virtualized;
@@ -56,7 +56,7 @@ const params = new URLSearchParams(location.search)
 //   ?est=N|kind            estimateSize override: fixed px, or per-kind
 //                          heuristic (mix=real only) like a production integration
 //   ?step=N                scrollup px per frame (default 10)
-const RV_VER = params.get('rv') || '3.14.6'
+const RV_VER = params.get('rv') || '3.14.10'
 const RATE = Number(params.get('rate') || 35)
 const USE_TRANSITION = params.get('transition') === '1'
 const LIST = params.get('list') || 'tanstack'
@@ -69,14 +69,13 @@ const MIX = params.get('mix') || 'code'
 const EST = params.get('est') || null
 const STEP = Number(params.get('step') || 10)
 const MD_MODE = params.get('plain') === '1' ? 'plain'
-  : (params.get('md') || (LIST === 'astryx' || SCENARIO === 'rest' || SCENARIO === 'reflow' || SCENARIO === 'scrollup' ? 'astryx' : 'marked'))
+  : (params.get('md') || 'astryx')
 
 const { useVirtualizer } = await import(
   '@tanstack/react-virtual'
 )
 
 let Streamdown = null
-let marked = null
 let AstryxMarkdown = null
 let AstryxTheme = null
 let astryxThemeObj = null
@@ -87,8 +86,6 @@ if (MD_MODE === 'streamdown') {
   } catch (e) {
     console.warn('[repro] streamdown failed to load; falling back to plain', e)
   }
-} else if (MD_MODE === 'marked') {
-  ;({ marked } = await import('marked'))
 } else if (MD_MODE === 'astryx') {
   document.body.classList.add('light')
   if (params.get('cv') === '1') document.body.classList.add('cv')
@@ -276,17 +273,11 @@ window.__stats = stats
 
 // ---------- app ----------
 function Message({ text, role }) {
-  const rendered = React.useMemo(
-    () => (marked ? marked.parse(text) : null),
-    [text],
-  )
   const body = AstryxMarkdown
     ? html`<${AstryxMarkdown}>${text}<//>`
     : Streamdown
       ? html`<${Streamdown}>${text}<//>`
-      : rendered !== null
-        ? html`<div dangerouslySetInnerHTML=${{ __html: rendered }} />`
-        : html`<pre style=${{ whiteSpace: 'pre-wrap', background: 'none', padding: 0 }}>${text}</pre>`
+      : html`<pre style=${{ whiteSpace: 'pre-wrap', background: 'none', padding: 0 }}>${text}</pre>`
   return html`<div><div class="role">${role}</div>${body}</div>`
 }
 
@@ -1456,7 +1447,7 @@ function RestAstryx({ messages, items }) {
 function summarize() {
   const secs = (performance.now() - stats.startedAt) / 1000
   return {
-    config: { list: LIST, rv: RV_VER, rafRO: params.get('rafRO') === '1', transition: USE_TRANSITION, smooth: params.get('smooth') === '1', rate: RATE, md: AstryxMarkdown ? 'astryx' : Streamdown ? 'streamdown' : marked ? 'marked' : 'plain' },
+    config: { list: LIST, rv: RV_VER, rafRO: params.get('rafRO') === '1', transition: USE_TRANSITION, smooth: params.get('smooth') === '1', rate: RATE, md: AstryxMarkdown ? 'astryx' : Streamdown ? 'streamdown' : 'plain' },
     seconds: +secs.toFixed(1),
     frames: stats.frames,
     unpinnedFrames: stats.unpinned,

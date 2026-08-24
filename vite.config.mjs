@@ -20,7 +20,7 @@ export default {
     // Everything the harness can dynamically import, pre-bundled up front so
     // first-visit dep discovery never reloads a bench run mid-measurement.
     include: [
-      'react', 'react-dom/client', 'htm', 'marked',
+      'react', 'react-dom/client', 'htm',
       '@tanstack/react-virtual', '@legendapp/list/react', 'virtua',
       '@virtuoso.dev/message-list',
       '@astryxdesign/core/Markdown', '@astryxdesign/core/theme',
