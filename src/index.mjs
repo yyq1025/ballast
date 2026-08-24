@@ -142,17 +142,46 @@ export function Ballast(props) {
     }
   }
 
-  // Spacer heights for a window under a given geometry.
-  const spacerHeights = (w) => {
+  // Size both spacers so the mounted window occupies its true place in the
+  // scroll range, under whatever geometry is current.
+  const writeSpacers = (w) => {
     const g = geo.current
-    const topH = w.end >= w.start && g.offsets.length > 0 ? g.offsets[w.start] : 0
-    const endBottom =
-      w.end >= w.start
-        ? w.end + 1 < g.offsets.length
-          ? g.offsets[w.end + 1]
-          : g.total
-        : 0
-    return [topH, Math.max(0, g.total - endBottom)]
+    const empty = w.end < w.start || g.offsets.length === 0
+    const top = empty ? 0 : g.offsets[w.start]
+    const belowEnd = empty
+      ? 0
+      : w.end + 1 < g.offsets.length
+        ? g.offsets[w.end + 1]
+        : g.total
+    if (spacerTopRef.current) spacerTopRef.current.style.height = `${top}px`
+    if (spacerBottomRef.current)
+      spacerBottomRef.current.style.height = `${Math.max(0, g.total - belowEnd)}px`
+  }
+
+  // Where a row identity + viewport offset puts scrollTop under the current
+  // geometry, and the reverse: the anchor for whatever is at a scroll offset.
+  const anchorAt = (scrollTop) => {
+    const g = geo.current
+    const idx = indexAt(scrollTop)
+    return {
+      kind: 'anchor',
+      key: g.keys[idx],
+      viewportOffset: g.offsets[idx] - scrollTop,
+    }
+  }
+
+  // Desired scrollTop for a reference frame, clamped to the scrollable range.
+  // null when the anchored row no longer exists in the data.
+  const targetFor = (m, el) => {
+    const g = geo.current
+    let raw
+    if (m.kind === 'end') raw = g.total - el.clientHeight - m.distance
+    else {
+      const idx = g.keys.indexOf(m.key)
+      if (idx < 0) return null
+      raw = g.offsets[idx] - m.viewportOffset
+    }
+    return Math.max(0, Math.min(raw, g.total - el.clientHeight))
   }
 
   // The single correction pass: spacers(old geo) -> measure -> recompute ->
@@ -168,12 +197,7 @@ export function Ballast(props) {
     // then reads as a user scroll). Style writes don't force layout, so
     // making the spacers consistent BEFORE the first offsetHeight read
     // removes the collapse window entirely.
-    {
-      const [t0, b0] = spacerHeights(winRef.current)
-      if (spacerTopRef.current) spacerTopRef.current.style.height = `${t0}px`
-      if (spacerBottomRef.current)
-        spacerBottomRef.current.style.height = `${b0}px`
-    }
+    writeSpacers(winRef.current)
     // Refresh the anchor from the LIVE scrollTop against the pre-measure
     // geometry (= what's currently painted). scroll events lag rAF-driven
     // scrolls by a frame; scrollTop itself is ground truth, so deriving the
@@ -187,66 +211,33 @@ export function Ballast(props) {
       !converging.current &&
       geo.current.keys.length > 0
     ) {
-      const idx = indexAt(el.scrollTop)
-      mode.current = {
-        kind: 'anchor',
-        key: geo.current.keys[idx],
-        viewportOffset: geo.current.offsets[idx] - el.scrollTop,
-      }
+      mode.current = anchorAt(el.scrollTop)
     }
-    if (measureModeRef.current === 'sync') {
-      for (const [key, rowEl] of rowEls.current) {
-        const px = rowEl.offsetHeight
-        if (sizes.current.get(key) !== px) {
-          sizes.current.set(key, px)
-          geoChanged.current = true
-        }
-      }
-    } else {
-      // First-mount sync backstop: an UNMEASURED row is about to paint at its
-      // real height while the geometry still carries its estimate. In
-      // document flow that displaces everything below it (the whole viewport)
-      // by (real - est) for one frame, then snaps back when RO delivers — a
-      // 2-painted-frame artifact per mount that absolute-positioning designs
-      // don't have. Measuring ONCE at mount closes it; growth and reflow of
-      // already-measured rows stay on the RO pipeline (no per-commit forced
-      // layout in steady state — this branch reads only when a fresh row
-      // mounted this commit).
-      for (const [key, rowEl] of rowEls.current) {
-        if (!sizes.current.has(key)) {
-          sizes.current.set(key, rowEl.offsetHeight)
-          geoChanged.current = true
-        }
+    // 'sync' re-measures the whole window every commit. 'ro' only measures
+    // rows it has never seen — the first-mount backstop: an UNMEASURED row is
+    // about to paint at its real height while the geometry still carries its
+    // estimate, and in document flow that displaces everything below it (the
+    // whole viewport) by (real - est) for one frame, then snaps back when RO
+    // delivers. Measuring ONCE at mount closes that; growth and reflow of
+    // known rows stay on the RO pipeline, so steady-state commits force no
+    // layout at all.
+    const remeasureAll = measureModeRef.current === 'sync'
+    for (const [key, rowEl] of rowEls.current) {
+      if (!remeasureAll && sizes.current.has(key)) continue
+      const px = rowEl.offsetHeight
+      if (sizes.current.get(key) !== px) {
+        sizes.current.set(key, px)
+        geoChanged.current = true
       }
     }
     recompute()
-    const g = geo.current
-    const w = winRef.current
-    const topH = w.end >= w.start && g.offsets.length > 0 ? g.offsets[w.start] : 0
-    const endBottom =
-      w.end >= w.start
-        ? w.end + 1 < g.offsets.length
-          ? g.offsets[w.end + 1]
-          : g.total
-        : 0
-    const bottomH = Math.max(0, g.total - endBottom)
-    if (spacerTopRef.current) spacerTopRef.current.style.height = `${topH}px`
-    if (spacerBottomRef.current)
-      spacerBottomRef.current.style.height = `${bottomH}px`
+    writeSpacers(winRef.current)
 
     // restore scrollTop from the stored reference frame
     if (converging.current) geoChanged.current = true
-    const m = mode.current
-    let target = null
-    if (m.kind === 'end') {
-      target = g.total - el.clientHeight - m.distance
-    } else {
-      const idx = g.keys.indexOf(m.key)
-      if (idx >= 0) target = g.offsets[idx] - m.viewportOffset
-    }
+    const target = targetFor(mode.current, el)
     if (target !== null && geoChanged.current) {
       geoChanged.current = false
-      target = Math.max(0, Math.min(target, g.total - el.clientHeight))
       if (Math.abs(el.scrollTop - target) > 0.5) {
         el.scrollTop = target
         // Read back: the browser may clamp the write if the spacer resize
@@ -266,10 +257,7 @@ export function Ballast(props) {
       converging.current &&
       target !== null &&
       dataRef.current.length > 0 &&
-      Math.abs(
-        el.scrollTop -
-          Math.max(0, Math.min(target, g.total - el.clientHeight)),
-      ) <= CONVERGE_EPSILON_PX
+      Math.abs(el.scrollTop - target) <= CONVERGE_EPSILON_PX
     ) {
       converging.current = false
     }
@@ -387,12 +375,7 @@ export function Ballast(props) {
       const g = geo.current
       const dist = el.scrollHeight - el.clientHeight - el.scrollTop
       const anchorHere = () => {
-        const idx = indexAt(el.scrollTop)
-        mode.current = {
-          kind: 'anchor',
-          key: g.keys[idx],
-          viewportOffset: g.offsets[idx] - el.scrollTop,
-        }
+        mode.current = anchorAt(el.scrollTop)
         userAway.current = 0
       }
       if (g.keys.length === 0) {

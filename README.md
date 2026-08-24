@@ -2,7 +2,7 @@
 
 An experimental virtualized list for React web, built for AI chat/feed transcripts and measured into existence: every design decision in this repo traces to a benchmark result, most of them collected against TanStack Virtual, LegendList web, virtua, and react-virtuoso's commercial Message List on the same corpus.
 
-**Status: experimental.** ~300 lines, Chromium-verified only. Not production software; the receipts below say exactly what has and hasn't been proven.
+**Status: experimental.** ~450 lines, Chromium-verified only. Not production software; the receipts below say exactly what has and hasn't been proven.
 
 ## The design
 
@@ -12,7 +12,7 @@ Three ideas, each borrowed from a production system that independently converged
 2. **Bottom-distance bookkeeping** — the desired position is stored as *px from the bottom edge* (the coordinate system ChatGPT's transcript uses, where it comes free from a `column-reverse` scroller; here it is JS bookkeeping on a normal-flow container, which keeps native reading order, find-in-page and a11y sequence intact). Above-viewport estimate→measured swaps and pinned tail growth are both identity operations in this frame, so the two most common disturbance classes in a chat workload need no compensation at all.
 3. **Identity-anchor override** — position is re-derived from an anchored *row key*: chosen automatically while the user reads history, or declared through `anchorToKey(key, viewportOffset)` (offset 0 = pin that row to the viewport top). Corrections re-derive from a reference instead of accumulating deltas, so a single miss self-heals — the compensation-delta bug class (measured in two competitors) structurally cannot occur. Identity anchoring is the convergent solution here, not a novel one: the CSS Scroll Anchoring spec does it at the browser level (picking a node, which is why every library in this space sets `overflow-anchor: none` to take over), React Native's `maintainVisibleContentPosition` and Android's `scrollToPositionWithOffset` do it natively, and LegendList web tracks an `anchorId`. The delta-compensation camp (TanStack; Virtuoso, which anchors by *index* rather than identity) is the other branch.
 
-Plus a **switchable measurement pipeline**, which the ablation below shows is the single most important knob in this design space:
+Plus a **switchable measurement pipeline**, which the ablation below shows is the single most important knob in this design space (one shared measure loop; the mode only decides whether a row that already has a size is re-read):
 
 - `measureMode: 'sync'` — forced-layout measurement inside the commit's layout effect. Corrections are atomic with the content change; zero observable transients. Costs a forced synchronous layout per commit — affordable for chat-sized windows (~20 rows, 57fps held), the classic thrashing risk for large/heavy pages.
 - `measureMode: 'ro'` — ResizeObserver measurement, plus a **first-mount sync backstop**: a row whose size was never measured is read once (`offsetHeight`) in its mount commit. In document flow an unmeasured row paints at its real height while the geometry still carries its estimate, displacing the whole viewport by (real − est) for a frame — an artifact class absolute-positioning designs don't have, and the entire pure-RO scroll-up deficit (20.9% → 0% measured). Growth and reflow of already-measured rows stay on the RO pipeline; steady-state commits do no forced layout.
@@ -103,7 +103,7 @@ The harness is a Vite dev server (port 5490, cross-origin-isolated so the memory
 Bench runners need a Chrome with `--remote-debugging-port=9222` (frame-accurate measurement does not work in embedded panes):
 
 ```bash
-node bench/bench.mjs "http://localhost:5490/harness/index.html?list=proto&scenario=stream&md=astryx&rate=20"
+node bench/bench.mjs "http://localhost:5490/harness/index.html?list=proto&scenario=stream&rate=20"
 ```
 
 ## Provenance

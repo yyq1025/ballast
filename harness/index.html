@@ -38,8 +38,6 @@ const params = new URLSearchParams(location.search)
 //   ?transition=1      wrap streaming setState in startTransition (emulates deferred rendering)
 //   ?smooth=1          followOnAppend: 'smooth'
 //   ?rate=20           chunk interval ms (default 35)
-//   ?md=astryx|plain|streamdown   markdown renderer (default astryx — every receipt's stack;
-//                                 streamdown@2.5.0 hard-freezes the renderer on this workload)
 //   ?list=tanstack|astryx|legend|virtuoso
 //                          list strategy (astryx = ChatLayout, non-virtualized;
 //                          legend = @legendapp/list react entry, chat-first virtualizer;
@@ -71,51 +69,36 @@ const STEP = Number(params.get('step') || 10)
 // ?dur=ms — stream scenario runtime (default 30s). Longer runs let interaction
 // probes take many samples inside one streaming window.
 const DUR = Number(params.get('dur') || 30000)
-const MD_MODE = params.get('plain') === '1' ? 'plain'
-  : (params.get('md') || 'astryx')
-
 const { useVirtualizer } = await import(
   '@tanstack/react-virtual'
 )
 
-let Streamdown = null
-let AstryxMarkdown = null
-let AstryxTheme = null
-let astryxThemeObj = null
-if (MD_MODE === 'streamdown') {
-  try {
-    const mod = await import('https://esm.sh/streamdown@2.5.0?deps=react@19,react-dom@19')
-    Streamdown = mod.Streamdown ?? mod.default
-  } catch (e) {
-    console.warn('[repro] streamdown failed to load; falling back to plain', e)
-  }
-} else if (MD_MODE === 'astryx') {
-  document.body.classList.add('light')
-  if (params.get('cv') === '1') document.body.classList.add('cv')
-  for (const href of [
-    '/node_modules/@astryxdesign/core/src/reset.css',
-    '/node_modules/@astryxdesign/core/dist/astryx.css',
-    '/node_modules/@astryxdesign/theme-neutral/dist/theme.css',
-    '/node_modules/@astryxdesign/core/src/tailwind-theme.css',
-  ]) {
-    const l = document.createElement('link')
-    l.rel = 'stylesheet'; l.href = href
-    document.head.appendChild(l)
-  }
-  const [md, th, nt] = await Promise.all([
-    import('@astryxdesign/core/Markdown'),
-    import('@astryxdesign/core/theme'),
-    import('@astryxdesign/theme-neutral/built'),
-  ])
-  AstryxMarkdown = md.Markdown
-  AstryxTheme = th.Theme
-  astryxThemeObj = nt.neutralTheme
+// Rows always render through astryx Markdown — the stack every receipt was
+// collected on. (Earlier `?md=marked|streamdown|plain` arms are gone: they
+// were renderer comparisons, not virtualizer measurements, and no result in
+// docs/RESULTS.md rests on them.)
+document.body.classList.add('light')
+if (params.get('cv') === '1') document.body.classList.add('cv')
+for (const href of [
+  '/node_modules/@astryxdesign/core/src/reset.css',
+  '/node_modules/@astryxdesign/core/dist/astryx.css',
+  '/node_modules/@astryxdesign/theme-neutral/dist/theme.css',
+  '/node_modules/@astryxdesign/core/src/tailwind-theme.css',
+]) {
+  const l = document.createElement('link')
+  l.rel = 'stylesheet'; l.href = href
+  document.head.appendChild(l)
 }
+const [AstryxMd, AstryxTh, AstryxNeutral] = await Promise.all([
+  import('@astryxdesign/core/Markdown'),
+  import('@astryxdesign/core/theme'),
+  import('@astryxdesign/theme-neutral/built'),
+])
+const AstryxMarkdown = AstryxMd.Markdown
+const AstryxTheme = AstryxTh.Theme
+const astryxThemeObj = AstryxNeutral.neutralTheme
 
-let Chat = null
-if (LIST === 'astryx' || MIX === 'real' || MIX === 'wild') {
-  Chat = await import('@astryxdesign/core/Chat')
-}
+const Chat = await import('@astryxdesign/core/Chat')
 
 // ?lv=3.3.7 pins @legendapp/list for the legend arm
 let LegendList = null
@@ -276,12 +259,10 @@ window.__stats = stats
 
 // ---------- app ----------
 function Message({ text, role }) {
-  const body = AstryxMarkdown
-    ? html`<${AstryxMarkdown}>${text}<//>`
-    : Streamdown
-      ? html`<${Streamdown}>${text}<//>`
-      : html`<pre style=${{ whiteSpace: 'pre-wrap', background: 'none', padding: 0 }}>${text}</pre>`
-  return html`<div><div class="role">${role}</div>${body}</div>`
+  return html`<div>
+    <div class="role">${role}</div>
+    <${AstryxMarkdown}>${text}<//>
+  </div>`
 }
 
 function App() {
@@ -851,7 +832,7 @@ function hudRest(phase) {
   const el = document.getElementById('hud')
   const s = stats
   el.textContent =
-    `list=${LIST} size=${SIZE} mix=${MIX} md=${MD_MODE} rest\n` +
+    `list=${LIST} size=${SIZE} mix=${MIX} rest\n` +
     `phase      ${phase}\n` +
     `mountMs    ${s.mountMs ?? '—'}\n` +
     `landedMs   ${s.landedMs ?? '—'}\n` +
@@ -1450,7 +1431,7 @@ function RestAstryx({ messages, items }) {
 function summarize() {
   const secs = (performance.now() - stats.startedAt) / 1000
   return {
-    config: { list: LIST, rv: RV_VER, rafRO: params.get('rafRO') === '1', transition: USE_TRANSITION, smooth: params.get('smooth') === '1', rate: RATE, md: AstryxMarkdown ? 'astryx' : Streamdown ? 'streamdown' : 'plain' },
+    config: { list: LIST, rv: RV_VER, rafRO: params.get('rafRO') === '1', transition: USE_TRANSITION, smooth: params.get('smooth') === '1', rate: RATE },
     seconds: +secs.toFixed(1),
     frames: stats.frames,
     unpinnedFrames: stats.unpinned,
@@ -1469,7 +1450,7 @@ function hud() {
   const s = summarize()
   const el = document.getElementById('hud')
   el.innerHTML =
-    `rv=${s.config.rv} rafRO=${s.config.rafRO ? 1 : 0} transition=${s.config.transition ? 1 : 0} smooth=${s.config.smooth ? 1 : 0} md=${s.config.md}\n` +
+    `rv=${s.config.rv} rafRO=${s.config.rafRO ? 1 : 0} transition=${s.config.transition ? 1 : 0} smooth=${s.config.smooth ? 1 : 0}\n` +
     `frames        ${s.frames}\n` +
     `unpinned      <span class="${s.unpinnedFrames ? 'bad' : 'ok'}">${s.unpinnedFrames} (${s.unpinnedPct}%)</span>\n` +
     `flickerCycles <span class="${s.flickerCycles ? 'bad' : 'ok'}">${s.flickerCycles}</span>\n` +
