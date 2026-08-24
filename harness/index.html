@@ -1528,16 +1528,18 @@ const VIRT = params.get('virt') === '1'
 // virtualizer ATTACHES to it through the layout's own published context
 // (useChatLayoutContext -> scrollContainerRef). Rows render into the layout's
 // content region as a bare fragment, so nothing nests a second scroller.
-function VirtualizedMessages({ messages }) {
+function VirtualizedMessages({ messages, apiRef, scrollElRef }) {
   const ctx = Chat.useChatLayoutContext()
   const [scrollEl, setScrollEl] = React.useState(null)
   // The layout's ref is populated during commit, after this child's effects,
   // so read it on a passive effect and keep it in state.
   React.useEffect(() => {
     setScrollEl(ctx?.scrollContainerRef?.current ?? null)
+    if (scrollElRef) scrollElRef.current = ctx?.scrollContainerRef?.current ?? null
   }, [ctx])
   return html`<${ProtoList}
     scrollElement=${scrollEl}
+    apiRef=${apiRef}
     measureMode=${params.get('measure') || 'ro'}
     data=${messages}
     keyExtractor=${(m) => m.id}
@@ -1546,7 +1548,35 @@ function VirtualizedMessages({ messages }) {
   />`
 }
 
+// ChatLayout's own scroll-to-bottom button jumps in DOM space: its spring
+// targets scrollHeight AS OF the click, but traversing a virtualized list
+// re-windows and replaces estimates with measurements, so the bottom MOVES
+// mid-flight and the spring lands short — the tail parks under the composer
+// dock (user-reported by hand test). The layout's documented scrollButton
+// override exists for exactly this: the same visual button, wired to the
+// virtualizer's declarative jump, which computes the window from the desired
+// bottom and converges regardless of estimate drift.
+function VirtScrollButton({ apiRef, scrollElRef }) {
+  const [visible, setVisible] = React.useState(false)
+  React.useEffect(() => {
+    const el = scrollElRef.current
+    if (!el) return
+    const onScroll = () => {
+      setVisible(el.scrollHeight - el.clientHeight - el.scrollTop > 100)
+    }
+    el.addEventListener('scroll', onScroll, { passive: true })
+    onScroll()
+    return () => el.removeEventListener('scroll', onScroll)
+  })
+  return html`<${Chat.ChatLayoutScrollButton}
+    isVisible=${visible}
+    onClick=${() => apiRef.current?.scrollToDistanceFromBottomPx(0)}
+  />`
+}
+
 function ChatLayoutApp() {
+  const virtApiRef = React.useRef(null)
+  const virtScrollElRef = React.useRef(null)
   const [messages, setMessages] = React.useState(() =>
     makeMessages(SIZE).map((text, i) => ({
       id: `m-${i}`,
@@ -1612,9 +1642,12 @@ function ChatLayoutApp() {
   // the arm does the same or the measurement would be reading document scroll.
   return html`
     <div style=${{ height: '100vh', display: 'flex', flexDirection: 'column' }}>
-      <${Chat.ChatLayout} composer=${composer}>
+      <${Chat.ChatLayout}
+        composer=${composer}
+        scrollButton=${VIRT ? html`<${VirtScrollButton} apiRef=${virtApiRef} scrollElRef=${virtScrollElRef} />` : undefined}
+      >
         ${VIRT
-          ? html`<${VirtualizedMessages} messages=${messages} />`
+          ? html`<${VirtualizedMessages} messages=${messages} apiRef=${virtApiRef} scrollElRef=${virtScrollElRef} />`
           : html`<${Chat.ChatMessageList} isStreaming=${isStreaming}>
               ${messages.map((m) => renderChatRow(m))}
             <//>`}
