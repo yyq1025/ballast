@@ -69,11 +69,8 @@ export function Ballast(props) {
     // while state holding the element re-renders with it available. Pass
     // null (not undefined) while the element is pending: absent = own-
     // container mode, null = attach mode waiting — falling back to the own
-    // container for even one commit inside a parent that doesn't bound its
-    // height lets clientHeight equal the content height, the window covers
-    // every row, and the next commit tears the full tree back down
-    // (measured: 2000 astryx messages mounted + removed, 10s of boot spent
-    // in removeChild and astryx context reads).
+    // container for even one commit mounts EVERY row (unbounded
+    // clientHeight) and tears it back down (measured: 10s boot).
     //
     // CONTRACT: row spacing must live INSIDE the rows (padding), never as
     // flex `gap` or margins on the container — offsetHeight cannot see
@@ -97,14 +94,13 @@ export function Ballast(props) {
 
   const ownScrollerRef = React.useRef(null)
   const attachMode = scrollElement !== undefined
-  // Closure discipline: everything the correction machinery reads that can
-  // change between renders lives in a ref, because parts of the machinery
-  // (the memoized pass chain, the once-created ResizeObserver callback) hold
-  // closures from an OLD render. The harness masked this by passing inline
-  // props (every render rebuilt the chain); a consumer who memoizes
-  // keyExtractor/getItemType — the idiomatic thing to do — would otherwise
-  // freeze the pass on the first render's scrollElement (null in attach
-  // mode: the list never measures again).
+  // CLOSURE DISCIPLINE (canonical statement): the machinery is plain
+  // render-scope functions, so same-commit callers always see live props;
+  // everything created ONCE and outliving renders — the ResizeObserver
+  // callback, the imperative handle, the rAF retry — must go through a
+  // live ref (syncRef and the prop mirrors below) instead of its birth
+  // closure. A memoized-consumer violation froze attach mode on the first
+  // render's null scroller (geometry stuck on estimates; ?memo=1 arm).
   const scrollElementRef = React.useRef(scrollElement)
   scrollElementRef.current = scrollElement
   const overscanTopRef = React.useRef(overscanTop)
@@ -175,15 +171,12 @@ export function Ballast(props) {
   // discovers ~nothing. An estimatedItemSize FUNCTION is authoritative and
   // never overridden (the consumer knows more than an average does).
   // Raw averages accumulate continuously — one bucket per item type when
-  // getItemType is given, plus a global bucket as the cold-start fallback —
-  // but the EFFECTIVE price moves with hysteresis (>10% relative change) and
-  // never while converging: every effective change reprices every unmeasured
-  // row at once, so a freely-tracking average makes anchor targets chase a
-  // moving sum during landings (measured: declared jumps 200px off after 20
-  // frames) and adds repricing jumps under fast scroll (measured: 1.1% at
-  // step=60). Repricing must also mark the geometry dirty, or the recompute
-  // shifts every offset while the restore skips its write (measured: a
-  // declared anchor deterministically 44px off).
+  // getItemType is given, plus a global cold-start bucket — but the
+  // EFFECTIVE price is gated (see effectiveAvg): hysteresis >10%, never
+  // while converging, only in scroll-quiet, and every move marks the
+  // geometry dirty. Each gate has a measured failure behind it (landings
+  // chasing a moving sum 200px off; 1.1% repricing jitter at step=60; a
+  // deterministic 44px anchor miss without the dirty mark).
   const bucketsRef = React.useRef(new Map())
   const typeByKey = React.useRef(new Map())
   const bucket = (t) => {
@@ -201,13 +194,10 @@ export function Ballast(props) {
       } else b.sum += px - prev
     }
   }
-  // A bucket's effective price INITIALIZES from whatever the row was priced
-  // at before the bucket existed — the global average, or the static
-  // estimate — so a type first encountered mid-scroll is not a cliff: its
-  // rows keep their current price and refine from there under the same
-  // hysteresis as everyone else. (An earlier version initialized buckets
-  // from zero-with-fallback, which made the first per-type pricing a mass
-  // repricing event in its own right.)
+  // A bucket's effective price INITIALIZES from the inherited baseline (the
+  // global average, or the static estimate), so a type first encountered
+  // mid-scroll is not a cliff — zero-initialized buckets made the first
+  // per-type pricing a mass repricing event.
   const effectiveAvg = (t, baseline) => {
     const b = bucketsRef.current.get(t)
     if (!b || b.count === 0) return baseline
@@ -235,20 +225,14 @@ export function Ballast(props) {
     }
     return b.eff
   }
-  const estOf = React.useCallback(
-    (item, i) => {
-      if (typeof estimatedItemSize === 'function')
-        return estimatedItemSize(item, i)
-      const global = effectiveAvg(GLOBAL_BUCKET, estimatedItemSize)
-      return getItemType
-        ? effectiveAvg(getItemType(item, i), global)
-        : global
-    },
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [estimatedItemSize, getItemType],
-  )
+  const estOf = (item, i) => {
+    if (typeof estimatedItemSize === 'function')
+      return estimatedItemSize(item, i)
+    const global = effectiveAvg(GLOBAL_BUCKET, estimatedItemSize)
+    return getItemType ? effectiveAvg(getItemType(item, i), global) : global
+  }
 
-  const recompute = React.useCallback(() => {
+  const recompute = () => {
     const d = dataRef.current
     const offsets = new Array(d.length)
     const keys = new Array(d.length)
@@ -267,7 +251,7 @@ export function Ballast(props) {
       y += sizes.current.get(keys[i]) ?? estOf(d[i], i)
     }
     geo.current = { offsets, total: y, keys, index }
-  }, [keyExtractor, estOf])
+  }
 
   // index of the last row whose offset <= y
   const indexAt = (y) => {
@@ -382,7 +366,7 @@ export function Ballast(props) {
 
   // The single correction pass: spacers(old geo) -> measure -> recompute ->
   // spacers(new geo) -> restore.
-  const syncAndRestore = React.useCallback(() => {
+  const syncAndRestore = () => {
     const el = getScroller()
     if (!el) return
     const entryScrollTop = el.scrollTop
@@ -509,11 +493,8 @@ export function Ballast(props) {
     // (compositor scrolls land at frame boundaries), so this never swallows
     // a real gesture.
     if (el.scrollTop !== entryScrollTop) progTarget.current = el.scrollTop
-  }, [recompute])
-  // Latest-pass ref (the onScrollRef idiom, applied to the pass itself): the
-  // ResizeObserver callback and the in-flight rAF retry are created once and
-  // outlive prop changes, so they must dial the CURRENT pass, not the one
-  // their closure was born with.
+  }
+  // Latest-pass ref for once-created callers (see CLOSURE DISCIPLINE).
   const syncRef = React.useRef(syncAndRestore)
   syncRef.current = syncAndRestore
 
@@ -525,19 +506,13 @@ export function Ballast(props) {
   }
 
   // Runs BEFORE this commit's DOM mutations (the useInsertionEffect
-  // contract): size the spacers for the NEW window while the OLD rows are
-  // still in the DOM. A window-slide commit otherwise has a gap between
-  // React removing evicted rows and our layout effect growing the spacer —
-  // and consumer row components' own layout effects run BEFORE ours
-  // (children first), so any of them forcing layout in that gap sees the
-  // collapsed height and the browser clamps scrollTop on the spot. The
-  // clamp is invisible to the pass (it happened pre-entry, no write of
-  // ours), so the live-anchor refresh then adopts it as the user's position
-  // (measured on the astryx ChatLayout arm: slow wheel near the bottom of a
-  // STATIC transcript yanked back 314-426px — the evicted rows' height —
-  // while plain-div harness rows never reproduced it). Pre-sizing makes the
-  // transient strictly TALLER (new spacer + old rows), which can never
-  // clamp; the mutations then bring it back to exact.
+  // contract): floor-size the spacers for the NEW window while the OLD rows
+  // are still in the DOM, so the transient is strictly TALLER and can never
+  // clamp scrollTop. Without it, a consumer row's own layout effect (they
+  // run before ours) forcing layout between React's row removal and our
+  // spacer write sees the collapsed height, the browser clamps on the spot,
+  // and the live-anchor refresh adopts the clamp as the user's position
+  // (measured: 314-426px yank-backs on the astryx arm, docs/RESULTS.md).
   React.useInsertionEffect(() => {
     writeSpacers(winRef.current, true)
   })
@@ -547,12 +522,9 @@ export function Ballast(props) {
     syncAndRestore()
   })
 
-  // (No separate initial-landing effect: the every-commit pass above already
-  // computes the window from the declared target — mode starts as
-  // {end, 0} — and it runs on the same commits, including the one where an
-  // attach-mode scrollElement arrives. An earlier dedicated landing effect
-  // was redundant and computed desiredTop without origin/below, so its
-  // attach-mode window sat one dock-height off; overscan masked it.)
+  // (No separate initial-landing effect: the every-commit pass computes the
+  // window from the declared target on the same commits, attach arrival
+  // included. A dedicated one was redundant and its desiredTop was wrong.)
 
   // In 'sync' mode the RO is only a backstop for out-of-commit size changes
   // (images, fonts). In 'ro' mode it IS the measurement pipeline: sizes come
@@ -603,16 +575,12 @@ export function Ballast(props) {
     userAway.current = 0
     converging.current = true
     geoChanged.current = true
-    // Through the latest-pass ref: declare is captured by the once-created
-    // imperative handle below, and must dial the current pass regardless.
-    syncRef.current()
+    syncRef.current() // captured by the once-created handle: live ref
   }
 
   // Imperative API — both methods are declarations, not scroll actions.
-  // useImperativeHandle rather than a render-phase `apiRef.current = {…}`
-  // assignment: a discarded concurrent render must not repoint the handle at
-  // a dropped closure. Created once — every method reads only refs (and
-  // syncRef), so the first-render closure never goes stale.
+  // useImperativeHandle so a discarded concurrent render cannot repoint the
+  // handle; created once, reads only refs (see CLOSURE DISCIPLINE).
   React.useImperativeHandle(apiRef, () => ({
       __debug: () => {
         const el = getScroller()
@@ -732,9 +700,7 @@ export function Ballast(props) {
     // event itself needs no scrollTop read, so there is no window to race.
     // Re-engaging stays position-based — dist <= endThreshold at a user
     // scroll event — with the scroll-to-bottom button as the declarative
-    // path back mid-stream. (An intent-space wheel accumulator, ChatGPT-
-    // style, was tried and removed: with honest running-average estimates
-    // the receding-bottom race it compensated for no longer reproduces.)
+    // path back mid-stream (history: docs/RESULTS.md, wheel accumulator).
     const cancel = (e) => {
       converging.current = false
       if (
