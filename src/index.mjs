@@ -13,11 +13,13 @@
 //      the first row intersecting the viewport top, so above-window size
 //      corrections keep the row you're reading visually frozen.
 //
-// Corrections are SYNCHRONOUS pre-paint: every commit's layout effect
-// re-measures the rendered window (offsetHeight forces layout), recomputes
-// offsets, resizes the spacers, and restores scrollTop from the mode — all
-// before the browser paints. No compensation deltas anywhere: position is
-// always re-derived from the stored reference, so a single miss self-heals.
+// Corrections are SYNCHRONOUS pre-paint: every commit's layout effect runs
+// the pass — measure ('sync' re-reads the whole window's offsetHeight;
+// 'ro', the default, forced-reads only never-seen rows and takes the rest
+// from ResizeObserver callbacks), recompute offsets, resize the spacers,
+// restore scrollTop from the mode — all before the browser paints. No
+// compensation deltas anywhere: position is always re-derived from the
+// stored reference, so a single miss self-heals.
 import * as React from 'react'
 
 const h = React.createElement
@@ -25,6 +27,17 @@ const h = React.createElement
 // "Did the declarative target land?" — a convergence tolerance, deliberately
 // NOT the same knob as `endThreshold` (which is a user-intent question).
 const CONVERGE_EPSILON_PX = 4
+
+const GLOBAL_BUCKET = '\u0000global'
+// Prior strength for shrinkage in effectiveAvg: at this many real samples
+// the bucket's own data and the inherited baseline carry equal weight.
+const PRIOR_SAMPLES = 5
+
+// flexShrink: 0 — inside a column-flex scroller the spacers are flex items
+// and would otherwise be compressed to fit (default shrink 1), silently
+// corrupting the whole geometry. Heights stay imperative; React only
+// manages this one property, so its style diffing never touches height.
+const spacerStyle = { flexShrink: 0 }
 
 export function Ballast(props) {
   const {
@@ -133,6 +146,8 @@ export function Ballast(props) {
   const lastUserEventT = React.useRef(0)
   const userAway = React.useRef(0)
   const geoChanged = React.useRef(false)
+  const rafRetry = React.useRef(null)
+  const prevScrollerRef = React.useRef(null)
   // Convergence protection (generalized from a one-shot landing flag):
   // whenever a declarative target is set (mount landing, or any imperative
   // scrollTo*), the list is "converging" — scroll events may not flip the
@@ -169,10 +184,6 @@ export function Ballast(props) {
   // step=60). Repricing must also mark the geometry dirty, or the recompute
   // shifts every offset while the restore skips its write (measured: a
   // declared anchor deterministically 44px off).
-  const GLOBAL_BUCKET = '\u0000global'
-  // Prior strength for shrinkage in effectiveAvg: at this many real samples
-  // the bucket's own data and the inherited baseline carry equal weight.
-  const PRIOR_SAMPLES = 5
   const bucketsRef = React.useRef(new Map())
   const typeByKey = React.useRef(new Map())
   const bucket = (t) => {
@@ -435,15 +446,23 @@ export function Ballast(props) {
 
     // restore scrollTop from the stored reference frame
     if (converging.current) geoChanged.current = true
-    const target = targetFor(mode.current, el)
-    // Unreachable declaration guard: anchorToKey to a key that is not in the
-    // data (or whose row was deleted mid-flight) yields a null target every
-    // pass, and convergence can only exit by reaching a target — while the
-    // convergence gate keeps ignoring scroll events, so scrollbar drags and
-    // keyboard scrolling could never recover (only wheel/touch intent
-    // could). Give up the convergence instead: the mode stays as declared
-    // and self-heals from the next real signal.
-    if (target === null) converging.current = false
+    let target = targetFor(mode.current, el)
+    // Dead-anchor fallback: a null target means the anchored key is not in
+    // the data — an anchorToKey to a missing key, or the anchored row left
+    // with a thread switch / history replacement. Convergence could never
+    // exit (it only exits by reaching a target, and its gate keeps ignoring
+    // scroll events — scrollbar and keyboard could not recover), and a
+    // parked dead anchor would neither follow nor restore until the next
+    // gesture. Fall back to follow-at-end, the chat default.
+    if (target === null) {
+      converging.current = false
+      if (dataRef.current.length > 0) {
+        mode.current = { kind: 'end', distance: 0 }
+        userAway.current = 0
+        geoChanged.current = true
+        target = targetFor(mode.current, el)
+      }
+    }
     if (target !== null && geoChanged.current) {
       geoChanged.current = false
       if (Math.abs(el.scrollTop - target) > 0.5) {
@@ -457,7 +476,13 @@ export function Ballast(props) {
         progTarget.current = actual
         if (Math.abs(actual - target) > 1) {
           geoChanged.current = true
-          requestAnimationFrame(() => syncRef.current())
+          // One retry slot: consecutive clamped writes coalesce, and unmount
+          // cancels it (a post-unmount pass would setWin on a dead tree).
+          if (rafRetry.current !== null) cancelAnimationFrame(rafRetry.current)
+          rafRetry.current = requestAnimationFrame(() => {
+            rafRetry.current = null
+            syncRef.current()
+          })
         }
       }
     }
@@ -522,17 +547,12 @@ export function Ballast(props) {
     syncAndRestore()
   })
 
-  // Initial landing: window over the tail (estimates only), then the main
-  // layout effect measures and restores to the bottom.
-  React.useLayoutEffect(() => {
-    const el = getScroller()
-    if (!el) return
-    recompute()
-    setWindowIfChanged(computeWindow(el, geo.current.total - el.clientHeight))
-    // In attach mode the element arrives a render late (the caller holds it in
-    // state), so the landing keys off it rather than firing once at mount.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [scrollElement])
+  // (No separate initial-landing effect: the every-commit pass above already
+  // computes the window from the declared target — mode starts as
+  // {end, 0} — and it runs on the same commits, including the one where an
+  // attach-mode scrollElement arrives. An earlier dedicated landing effect
+  // was redundant and computed desiredTop without origin/below, so its
+  // attach-mode window sat one dock-height off; overscan masked it.)
 
   // In 'sync' mode the RO is only a backstop for out-of-commit size changes
   // (images, fonts). In 'ro' mode it IS the measurement pipeline: sizes come
@@ -564,7 +584,13 @@ export function Ballast(props) {
       syncRef.current()
     })
   }
-  React.useEffect(() => () => roRef.current?.disconnect(), [])
+  React.useEffect(
+    () => () => {
+      roRef.current?.disconnect()
+      if (rafRetry.current !== null) cancelAnimationFrame(rafRetry.current)
+    },
+    [],
+  )
 
   // A DECLARATION re-points the reference frame and lets the restore loop
   // converge: machine-driven regime, displacement cleared, protected from
@@ -577,12 +603,17 @@ export function Ballast(props) {
     userAway.current = 0
     converging.current = true
     geoChanged.current = true
-    syncAndRestore()
+    // Through the latest-pass ref: declare is captured by the once-created
+    // imperative handle below, and must dial the current pass regardless.
+    syncRef.current()
   }
 
   // Imperative API — both methods are declarations, not scroll actions.
-  if (apiRef) {
-    apiRef.current = {
+  // useImperativeHandle rather than a render-phase `apiRef.current = {…}`
+  // assignment: a discarded concurrent render must not repoint the handle at
+  // a dropped closure. Created once — every method reads only refs (and
+  // syncRef), so the first-render closure never goes stale.
+  React.useImperativeHandle(apiRef, () => ({
       __debug: () => {
         const el = getScroller()
         const g = geo.current
@@ -606,10 +637,13 @@ export function Ballast(props) {
       // absorbed. Note the position still clamps to the scrollable range:
       // pinning a row near the end needs reserved space below it, which
       // this primitive does not provide yet.
+      // The key must exist in the CURRENT data: a missing key falls back to
+      // follow-at-end on the next pass (see the dead-anchor fallback), so
+      // declare after the data commit, not ahead of it.
       anchorToKey: (key, viewportOffset = 0) =>
         declare({ kind: 'anchor', key: String(key), viewportOffset }),
-    }
-  }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }), [])
 
   const onScroll = () => {
     const el = getScroller()
@@ -675,6 +709,16 @@ export function Ballast(props) {
   React.useEffect(() => {
     const el = getScroller()
     if (!el) return
+    // A REPLACED scroller (not the first arrival) carries none of the old
+    // one's scroll state: a stale lastEventST would difference two unrelated
+    // scrollTops into a phantom user displacement (instant spurious unpin),
+    // and a stale echo expectation could swallow the first real event.
+    if (prevScrollerRef.current !== null && prevScrollerRef.current !== el) {
+      lastEventST.current = null
+      userAway.current = 0
+      progTarget.current = null
+    }
+    prevScrollerRef.current = el
     // Intent signals break convergence early: wheel/touchstart are USER INPUT,
     // unlike scroll events (which mix in our own writes and clamps).
     //
@@ -751,11 +795,6 @@ export function Ballast(props) {
     return cb
   }
 
-  // flexShrink: 0 — inside a column-flex scroller the spacers are flex items
-  // and would otherwise be compressed to fit (default shrink 1), silently
-  // corrupting the whole geometry. Heights stay imperative; React only
-  // manages this one property, so its style diffing never touches height.
-  const spacerStyle = { flexShrink: 0 }
   const children = [
     h('div', { key: '__top', ref: spacerTopRef, style: spacerStyle, 'aria-hidden': true }),
   ]

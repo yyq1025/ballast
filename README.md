@@ -73,6 +73,16 @@ Both comparisons are against libraries measured in this repo's own harness, on t
 
 **vs LegendList web.** The closest relative — its mvcp anchoring philosophy is one of the three ideas this design borrows, it measures gesture-clean in this harness, and it is what the author's own production app ships today. ballast's edges are narrower and honestly stated: the streaming margin (0.1–0.2% vs 1.4–1.7%, structural — same-task measure+restore has no observable window); the sync gear's zero-proof (a reference implementation showing artifacts are a pipeline choice, which a shipped library cannot afford to carry); auditability (~430 lines vs a dual-platform RN+web codebase, relevant when a design system wants an ownable primitive rather than a dependency); and document-flow semantics (native cross-row selection, find-in-page, cheap aria-posinset — absolute positioning fights all three). LegendList wins on production maturity, one API across RN and web, recycling and per-type estimates, and a maintained feature surface. One caveat applies to both it and TanStack equally: neither guards paint-level behavior in CI (LegendList ships jsdom-only tests; TanStack's own benchmarks missed its regression) — which is why this repo treats the conformance harness as half the deliverable.
 
+## Caller contract
+
+Things the API cannot enforce but the geometry depends on:
+
+- **Row spacing lives inside the rows** (padding), never as flex `gap` or margins on the container — `offsetHeight` cannot see either, so the geometry would drift by one gap per row. The harness nests inside astryx's `ChatMessageList` with `gap=0` for exactly this reason.
+- **Keys are stable string identities**, not indices. Keys are `String()`-coerced internally (the RO pipeline reads them back from `dataset.pkey`); index-derived keys corrupt the size cache and the per-type averages on any prepend or deletion.
+- **`data` changes are detected by reference**, not deep equality. Mutating the last item in place and re-setting the same array marks nothing dirty; in `ro` gear only a ResizeObserver callback would eventually notice.
+- **The component is not memoized**: every parent render runs a full correction pass (in `sync` gear that includes a forced layout of the visible window). Wrap it in `React.memo` or keep the parent quiet if that matters.
+- **`anchorToKey` clamps to the scrollable range** — pinning a row near the end needs reserved space below it, which this primitive does not provide — and the key must already exist in the current data: a missing key falls back to follow-at-end on the next pass.
+
 ## Known debts (honest list)
 
 - **RO-gear residuals are corpus-sensitive, not closed**: on the current corpus (astryx 0.4.7) both former residuals measure 0% — flick reversals (was 0.7–0.9% / 473px) and the est=40 axis (was 6.4% / 262px) — but neither mechanism was ever isolated, so treat them as dormant until a reproducing corpus is found, not fixed. Historical numbers in `docs/RESULTS.md`. The previous version of this entry estimated the RO deficit fix at 300–500 lines of "same-frame correction discipline" — falsified: the measured fix was ~40 lines (first-mount sync backstop + entry/exit claim + sticky echo + direction gate).
