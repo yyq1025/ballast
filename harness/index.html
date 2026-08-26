@@ -174,6 +174,9 @@ const PREPEND_BATCHES = Number(params.get('batches') || 3)
 const PREPEND_UPPX = Number(params.get('uppx') || 4000)
 const PREPEND_WATCH = Number(params.get('watch') || 90)
 const PREPEND_AT_END = params.get('at') === 'end'
+// ?auto=0 — skip the scripted probe and load pages by hand instead. The
+// scripted run is over in seconds, which is the wrong shape for looking at it.
+const PREPEND_AUTO = params.get('auto') !== '0'
 const { useVirtualizer } = await import(
   '@tanstack/react-virtual'
 )
@@ -1311,8 +1314,85 @@ function hudScrollup(phase) {
 // stable id painted on each row (`data-pid`), never by DOM node identity: a
 // recycling list may hand the same node to another row, and an absolute arm may
 // unmount and remount it, both of which would silently invalidate a node ref.
+// Probe several points down the midline, not just the centre: a single centre
+// hit lands on a spacer whenever the window is momentarily short, and a missing
+// anchor would then be reported as a LOST one — a false red. Found by pressing
+// the hand-mode button right after a long jump.
+function pickPrependAnchor(el) {
+  const cr = el.getBoundingClientRect()
+  const x = cr.left + cr.width / 2
+  for (const f of [0.5, 0.35, 0.65, 0.2, 0.8]) {
+    const n = document.elementFromPoint(x, cr.top + cr.height * f)
+    const row = n && n.closest ? n.closest('[data-pid]') : null
+    if (row) return row
+  }
+  return null
+}
+
 function usePrependMeasurement(findScrollEl) {
   React.useEffect(() => {
+    if (!PREPEND_AUTO) {
+      // Hand mode: scroll wherever you like, then load a page and watch. The
+      // readout is the same anchor test the scripted probe runs, taken across
+      // the button press.
+      const el = document.getElementById('hud')
+      const btn = document.createElement('button')
+      btn.textContent = `load ${PREPEND_N} older`
+      btn.style.cssText =
+        'position:fixed;left:12px;bottom:12px;z-index:9;padding:10px 14px;' +
+        'font:13px ui-monospace;border-radius:8px;border:1px solid #888;background:#fff'
+      const paint = (msg) => { el.innerHTML = `prepend list=${LIST} mix=${MIX} HAND MODE\n${msg}` }
+      paint('scroll anywhere, then press the button')
+      // Same quiet gate the scripted probe uses. Without it `unpaid` is
+      // meaningless: it assumes every pixel of growth is ABOVE the viewport,
+      // which is only true once measurement has stopped churning — press it
+      // right after a scroll and rows settling BELOW the fold get counted as
+      // an unpaid debt they never were. (Caught by pressing it too early.)
+      let prevSh = -1, quiet = 0, armed = false
+      const gate = () => {
+        const sc = findScrollEl()
+        if (sc) {
+          const sh = sc.scrollHeight
+          if (Math.abs(sh - prevSh) > 2) quiet = 0; else quiet++
+          prevSh = sh
+        }
+        const now = quiet >= 20
+        if (now !== armed) {
+          armed = now
+          btn.disabled = !now
+          btn.textContent = now ? `load ${PREPEND_N} older` : 'settling…'
+        }
+        gateRaf = requestAnimationFrame(gate)
+      }
+      let gateRaf = requestAnimationFrame(gate)
+      btn.onclick = () => {
+        const sc = findScrollEl()
+        if (!sc || !armed) return
+        const row = pickPrependAnchor(sc)
+        if (!row) { paint('no row under the viewport midline — scroll and retry'); return }
+        const id = row.getAttribute('data-pid')
+        const top0 = row.getBoundingClientRect().top
+        const sh0 = sc.scrollHeight, st0 = sc.scrollTop
+        window.__prepend(PREPEND_N)
+        let worst = 0, n = 0
+        const tick = () => {
+          const r = id ? document.querySelector(`[data-pid="${id}"]`) : null
+          if (!r) { paint(`anchor <span class="bad">LOST</span> — the view is no longer holding ${id}`); return }
+          worst = Math.max(worst, Math.abs(r.getBoundingClientRect().top - top0))
+          if (++n < 90) { requestAnimationFrame(tick); return }
+          const unpaid = Math.abs((sc.scrollHeight - sh0) - (sc.scrollTop - st0))
+          paint(
+            `anchor        <span class="${worst > 4 ? 'bad' : 'ok'}">${id} moved ${Math.round(worst)}px</span>\n` +
+            `grew above    ${Math.round(sc.scrollHeight - sh0)}px\n` +
+            `scrollTop paid ${Math.round(sc.scrollTop - st0)}px\n` +
+            `unpaid        <span class="${unpaid > 4 ? 'bad' : 'ok'}">${Math.round(unpaid)}px</span>`,
+          )
+        }
+        requestAnimationFrame(tick)
+      }
+      document.body.appendChild(btn)
+      return () => { cancelAnimationFrame(gateRaf); btn.remove() }
+    }
     const MAX_MS = 40000
     let raf, cachedEl = null
     let phase = 'land'
@@ -1340,9 +1420,7 @@ function usePrependMeasurement(findScrollEl) {
         anchorId = null
         anchorTop0 = pinErr(el)
       } else {
-        const cr = el.getBoundingClientRect()
-        const node = document.elementFromPoint(cr.left + cr.width / 2, cr.top + cr.height / 2)
-        const row = node && node.closest ? node.closest('[data-pid]') : null
+        const row = pickPrependAnchor(el)
         anchorId = row ? row.getAttribute('data-pid') : null
         anchorTop0 = row ? row.getBoundingClientRect().top : 0
       }
@@ -1356,6 +1434,9 @@ function usePrependMeasurement(findScrollEl) {
         maxShiftPx: 0,
         residualPx: 0,
         anchorLost: false,
+        // "could not pick one" is not "the view dropped it" — reporting the
+        // first as the second is a false red.
+        anchorMissing: anchorId === null && !PREPEND_AT_END,
       }
       window.__prepend(PREPEND_N)
     }
@@ -1366,7 +1447,8 @@ function usePrependMeasurement(findScrollEl) {
       if (PREPEND_AT_END) {
         dev = Math.abs(pinErr(el) - anchorTop0)
       } else {
-        const row = anchorId ? rowFor(anchorId) : null
+        if (cur.anchorMissing) return
+        const row = rowFor(anchorId)
         if (!row) { cur.anchorLost = true; return }
         dev = Math.abs(row.getBoundingClientRect().top - anchorTop0)
       }
@@ -1444,6 +1526,7 @@ function summarizePrepend() {
     shiftFrames: b.reduce((a, x) => a + (x.shiftFrames || 0), 0),
     watchFrames: b.reduce((a, x) => a + (x.watchFrames || 0), 0),
     anchorLost: b.some((x) => x.anchorLost),
+    anchorMissing: b.filter((x) => x.anchorMissing).length,
     // How much of the growth above the viewport was never compensated for.
     maxCompensationErrPx: max('compensationErrPx'),
     batches: b,
@@ -1458,7 +1541,8 @@ function hudPrepend(phase) {
     `prepend list=${s.config.list} mix=${s.config.mix} size=${s.config.size} est=${s.config.est}${PREPEND_NOKEY ? ' NOKEY(control)' : ''}\n` +
     `batch         ${s.batchesDone}/${s.config.batches} × ${s.config.rows} rows @ ${s.config.at}\n` +
     `phase         ${phase}\n` +
-    `anchor        <span class="${s.anchorLost ? 'bad' : 'ok'}">${s.anchorLost ? 'LOST' : 'held'}</span>\n` +
+    `anchor        <span class="${s.anchorLost ? 'bad' : 'ok'}">${s.anchorLost ? 'LOST' : 'held'}</span>` +
+    `${s.anchorMissing ? ` (${s.anchorMissing} batch(es) had no row to anchor — not a failure)` : ''}\n` +
     `shift(PAINTED) <span class="${bad ? 'bad' : 'ok'}">max ${s.maxShiftPx}px residual ${s.residualPx}px — ${s.shiftFrames}/${s.watchFrames} frames</span>\n` +
     `unpaid        <span class="${s.maxCompensationErrPx > 4 ? 'bad' : 'ok'}">${s.maxCompensationErrPx}px of growth uncompensated</span>` +
     `${stats.done ? '\n— DONE —' : ''}`
