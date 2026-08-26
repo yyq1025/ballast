@@ -135,3 +135,85 @@ Mechanism changes landed this session, each with its receipt:
 - **Wheel-up instant unpin** (the piece of wheel handling that stays): during a stream, a follow write can land between the browser moving scrollTop and the scroll handler reading it, so the user's upward movement reads back as our own echo and the disengage is swallowed (measured: scroll-up during an active stream snapped straight back to the bottom; ablation reproduced 1/3 runs). Acting on the wheel event needs no scrollTop read — no race window.
 - **Pre-mutation spacer floor (useInsertionEffect).** Slow wheel near the bottom of a *static* transcript yanked back 314–426px at random clicks on the astryx ChatLayout arm — never on plain-div rows. A window-slide commit has a gap between React removing evicted rows and our layout effect growing the spacer; consumer row effects run first (children before parents), and one forcing layout in that gap sees the collapsed height → browser clamps scrollTop → the live-anchor refresh adopts the clamp as the user's position. Verified by elimination: instance-level scrollTop-setter shadow showed no JS writer, rAF-sampled scrollHeight constant, magnitude = evicted rows' height. The insertion effect floor-sizes spacers (grow-only) before mutations, so the transient is strictly taller and cannot clamp. Post-fix: 0 pushes across mouse/trackpad/very-slow profiles.
 - **Two external audits, both substantially correct.** GPT found the stale-closure class: the memoized pass chain froze on the first render's `scrollElement` — masked in the harness by inline props, fatal for an idiomatic memoized consumer (measured: geometry frozen at 120px estimates, scrollHeight 121838 vs 292832 live, with ChatLayout's own spring masking the corpse by pinning the bottom; `?memo=1` arm is the permanent regression). Grok caught a committed bisect stump (container observe silently disabled while the commit message claimed it) plus the redundant landing effect whose wrong desiredTop was the source of the constant 1px landing offset — probes settle at exactly 0 after its deletion. The closure fix's end state: machinery is plain render-scope functions; everything created once (RO callback, imperative handle, rAF retry) dials `syncRef.current`.
+
+## 7. 2026-08-25 session: the touch write-gate
+
+Every measurement above drives the list through wheel gestures or programmatic
+scrolls. Both leave one input class untested: **touch**, which produces scroll
+events with no wheel event anywhere. A phone hand-test ("dragging up doesn't
+track my finger, and it bounces back") opened the gap.
+
+### The probe
+
+Same shape as the scroll-up probe, but the input is a bare `scrollTop` walk
+(−8px/frame, 600 frames) framed by synthetic `touchstart`/`touchend` — i.e. the
+event vocabulary a finger produces. Three numbers: pushbacks (frames where the
+engine reverted the commanded step), drift (the anchored row's *painted*
+position deviating from the commanded movement), and the flush shift (painted
+movement after the gesture ends).
+
+### Three defects, one input class
+
+| | before | after |
+|---|---|---|
+| slow drag off the bottom | 599/600 frames reverted, 8px travelled of 4800 | 0 reverted, full travel |
+| drift under the finger (48000px travel) | ±46–90px per mount batch | 0 events, 0px |
+| flush after the gesture | up to +148px painted jump | 0–1px |
+| simulator fling | ~2 messages, momentum killed | ~39 messages |
+
+1. **Bottom deadlock.** Re-engage is a position test (`dist ≤ endThreshold`),
+   disengage is a displacement test. With per-event restores writing scrollTop
+   back, a slow drag never accumulated enough displacement to escape the
+   re-engage zone: every step was undone before the next arrived. Wheel input
+   never hit this — wheel-up unpins instantly, and one wheel notch clears 24px
+   in a single event. Identical in Blink and WebKit (599/600 both), so this is
+   virtualizer behaviour, not an engine difference.
+2. **Momentum cancellation.** Where momentum belongs to the scroll view (iOS
+   WebKit, Android), a programmatic `scrollTop` write cancels the fling. Where
+   it lives in the input stream (a macOS trackpad, arriving as wheel events), a
+   write cannot stop it — and that platform emits no touch events, so no
+   platform test is needed: gating on touch events *is* the platform test.
+3. **Uncompensated drift.** With scrollTop untouchable, rows mounting above the
+   viewport land their (real − estimate) delta in the geometry and everything
+   below crawls under the finger.
+
+### The fix, and why flow layout can do better here
+
+While the gate holds, the correction that would have been written to scrollTop
+goes into the **top spacer** instead (`gestureAdj`), and `paintOrigin()` =
+origin + adjustment converts between painted space and model space so the two
+are never mixed. Absolute-positioned virtualizers have no equivalent knob: rows
+are placed by transform, so a measurement must move them, and the only
+compensation available is scrollTop — which is exactly what a gesture forbids.
+TanStack defers the deltas into a ledger and replays them after the gesture
+(measured on the same phone, same corpus: a 3675px settle jump); the spacer
+absorbs them as they happen, so the flush is an ordinary sync from the mode
+with no ledger to replay (0–1px).
+
+The flush re-states the reference frame **unconditionally** — that restatement
+is also what hands the adjustment back (`anchorAt` reads through
+`paintOrigin`, so the carried adjustment folds into the stored viewportOffset,
+and zeroing it leaves the sync one balancing write in the same task). Whether
+the gesture *moved* decides only the semantics: a real scroll re-judges follow
+against the bottom edge, a plain tap keeps the mode it had. Two measured
+counterexamples pin this shape: skipping the fold on a tap dropped the
+adjustment on the floor (10680px jump when a tap landed while measurements were
+still arriving), and letting the live-anchor refresh re-derive afterwards erased
+the fold (+148px).
+
+### Audit follow-ups (2026-08-25)
+
+- **"Did the gesture move?" cannot be "did any scroll event fire."** A browser
+  clamp from a spacer shrink is movement for settling purposes but is not user
+  intent; counting it let a tap mid-stream re-judge follow against a distance
+  the stream itself had grown. The settle clock takes every scroll; the intent
+  flag takes only non-echo ones.
+- **Multi-touch.** Only the last finger off the glass starts settling
+  (`e.touches.length === 0`), or a two-finger drag takes a write under the
+  remaining finger. A finger landing during the settle window re-opens the same
+  gesture — the adjustment has not been handed back yet.
+- **Falsified: short-list settle deadlock.** An audit predicted infinite
+  polling when `scrollHeight - clientHeight < 0`. Both engines report
+  scrollHeight as at least clientHeight (checked across integer, fractional and
+  bordered boxes), so the difference is never negative; the clamp is kept for
+  invariant symmetry with `targetFor`, not as a fix.
