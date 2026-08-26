@@ -27,6 +27,21 @@ use a real, visible Chrome window.
 - `logstreamprobe.mjs` — instruments astryx lab LogStream's own follow logic (`?list=logstream`).
 - `anchorprobe.mjs` — imperative `anchorToKey` long jumps: blank frames, frames-to-land, final offset.
 - `nudgestorm.mjs` — ~140 sub-threshold nudges at varied frame phases in one stream, reporting every disengage decision with the state that caused it.
+- `repriceprobe.mjs` — holds a declared `anchorToKey` and checks the invariant a
+  running-average move must not break: scrollTop and the geometry's own
+  `offsetOf(anchorKey)` have to agree once everything settles (docs/RESULTS.md
+  § 11). It reports `skip` when the averages never moved — which is what it does
+  against the current corpora, because they settle during mount. The reproduction
+  that DOES arm lives in `bench/tanstack-suite/`; keep this one as the invariant
+  check against a corpus that can move the averages after a jump.
+
+## Cross-library suites
+
+- `tanstack-suite/` — an adapter making ballast an arm of TanStack Virtual's own
+  Playwright benchmark suite (mount/settle/landing-accuracy/heap), plus
+  `repriceprobe.mjs`, the validated reproduction of the § 11 repricing race
+  (2/10 misses before the fix, 0/12 after). See its README for setup; it is the
+  one thing here that is not raw CDP, for reasons documented in the file.
 
 Both need `scenario=stream` plus a long `dur` (e.g. `&dur=120000`) so all samples land inside one streaming window; sampling after the stream ends measures a static list and reads as false failures.
 

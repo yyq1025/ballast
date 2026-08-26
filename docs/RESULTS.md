@@ -684,3 +684,168 @@ which meant the cap had never fired and the regression belonged to a different
 change made in the same sitting. Two variants had been designed and measured
 against a cause that was not there. **Whenever a change and a regression appear
 together, the control is the change removed, not the change explained.**
+
+## 11. 2026-08-26: TanStack's own benchmark suite, and a repricing race it found
+
+Measured against `@tanstack/virtual`'s in-repo Playwright suite at upstream `main`
+`e9874f0` (2026-08-18) — 12 scenarios behind one `HarnessHandle` contract, run on
+a `vite build` preview, arms `ballast-ro`, `ballast-sync`, `tanstack` (core
+3.17.8 / react 3.14.10), `virtua` 0.49.3, `react-virtuoso` 4.18.12,
+`react-window` 2.3.0. Adapter and setup: `bench/tanstack-suite/`.
+
+That suite measures throughput and cost — mount, settle, `scrollToIndex` landing
+accuracy, heap — and no painted artifacts, so it says nothing about the axes § 1
+and § 2 lead with. It is worth running anyway for exactly the reason below: it
+reaches list sizes this repo's harness never has.
+
+### At 10k, the design's own size class: parity
+
+Medians of 5, `virtua` omitted from the accuracy rows because the harness's
+`[data-index]` lookup returns `-1` for it (a harness artifact, not a virtua
+result); `react-window` lands 135–224px off on all four.
+
+| axis | ballast ro | ballast sync | tanstack | virtuoso |
+|---|---:|---:|---:|---:|
+| `jump-to-middle-accuracy-dynamic-10k` | **0px** | **0px** | 0px | 0px |
+| `jump-to-last-accuracy-dynamic-10k` | **0px** | **0px** | 0px | 0px |
+| `jump-while-measuring-accuracy-dynamic-10k` | **0px** | **0px** | 0px | 0px |
+| `jump-wide-variance-accuracy-10k` | **0px** | **0px** | 0px | 0px |
+| `jump-to-end-dynamic-10k` settle | 90ms | 92ms | 85ms | 154ms |
+| `mount-dynamic-10k` settle | 126ms | 123ms | 124ms | 185ms |
+
+Zero on all twenty accuracy runs per gear, no variance. The settle deltas are
+frame quantisation (the harness's stability rule is 5 or 8 unchanged frames), not
+a gap. `jump-to-last` maps to `scrollToDistanceFromBottomPx(0)` — the suite only
+ever uses `align: 'end'` at the last index, which is ballast's native frame.
+
+### At 100k: `anchorToKey` lands wrong 25–50% of the time, and does not self-heal
+
+Pushed past the suite's 10k ceiling with two added scenarios, `est=30`:
+
+| | landing error, per run |
+|---|---|
+| ballast-ro | `0.3, 350652, 0.3, 0.3, 0.3, 697962, 697962, 697962, 0.3, 0.3` |
+| ballast-sync | `0.3, 0.3, 0.3, 0.3, 108558, 295268, 26783, 0.3, 0.3, 0.3` |
+| tanstack | `0,0,0,0,0,0,0,0,0,0` |
+
+State captured at a miss, every time:
+
+```
+mode       = {kind:'anchor', key:'50000', viewportOffset:0}   <- declaration intact
+converging = false                                            <- believes it landed
+scrollTop  = 1,972,104
+offsetOf('50000') = 2,199,443                                 <- gap == the error
+```
+
+Not an adapter artifact: dropping the adapter's start-at-top declaration
+(`?noTopAnchor=1`) made it *worse*, 4/8 vs 2/8. Not a size threshold either —
+0/12 at 30k and 0/12 at 50k, but in those runs `eff` never left the estimate at
+all. Setting `estimatedItemSize` to the value `eff` converges to (44) on the same
+100k list: **0/12**. So the trigger is the repricing, and list size only sets the
+magnitude — (reprice delta) × (rows above the anchor).
+
+### Cause: a clock reading evaluated inside an O(N) loop
+
+Traced with a pass-level ring buffer. Two consecutive passes:
+
+```
+pass      st=1501481  conv=false  geoIn=true   eff=30
+reprice   30 -> 43.98
+restore?  target=1886189  off50k=1886189  total=4085397   <- half-repriced geometry
+wrote     1886189
+pass      st=1886189  conv=false  geoIn=FALSE  eff=43.98
+restore?  target=2199443  off50k=2199443  total=4398651  geo=FALSE   <- write gated off
+```
+
+2199443 − 1886189 = 313,254, the reported error exactly. The published
+`total=4,085,397` is neither the old 3,001,972 nor the settled 4,398,651:
+(4085397−3001972)/(4398651−3001972) = 77.6% of rows took the new price, i.e. the
+change landed around row 22,400 of 100,000 — **part way through the loop**.
+
+The repricing decision lived inside `effectiveAvg`, called per row from
+`recompute()`, and one of its gates is `performance.now() - lastUserEventT > 250`.
+`lastUserEventT` starts at 0, so on an untouched page that gate opens exactly once,
+at t+250ms. A recompute loop long enough to be *running* at that instant prices the
+head of the list at the old number and the tail at the new one. The pass then
+restored scrollTop to that half-repriced anchor offset, consumed `geoChanged`, and
+the next pass — holding the consistent geometry and the correct target — found the
+flag clear and never wrote.
+
+Everything follows: the odds scale with loop length (10k, 15/15 clean; 100k,
+25–50%), and the gate re-crosses 250ms after every gesture, so this is a
+size-amplified race rather than a large-list-only bug.
+
+### What the other libraries do here (source-read, versions as above)
+
+| | reprices? | statistic | frequency | position correction |
+|---|---|---|---|---|
+| TanStack | no | — | never | `itemSizeCache.get(key) ?? estimateSize(index)`; no `avg`/`mean` anywhere in core |
+| react-virtuoso | no | — | never | scalar `defaultItemHeight`; `itemSize` is a *measuring* fn `(el, field) => number` |
+| react-window v2 | nominally | mean | live | `getAverageRowHeight()` is near-dead: `getRowHeight(i)` writes `defaultRowHeight` into the cache on first touch, citing its issue #863, "avoid scroll jumps" |
+| virtua | yes | **median** | **once** (`shouldAutoEstimateItemSize` latched off; only after `_totalMeasuredSize > viewportSize`; disabled entirely if `itemSize` is passed) | `$estimateDefaultSize(startIndex)` **returns** the px displacement of unmeasured rows above the viewport; caller feeds it straight to `applyJump()` |
+| LegendList | yes | mean, per `itemType` | live | `getItemSize` reads the live average only `!scrollingTo`; during a programmatic scroll it prices from `scrollingTo.averageSizeSnapshot` |
+| ballast (before) | yes | mean + shrinkage prior, per bucket | live | none — relied on a later pass re-deriving from the anchor |
+
+The invariant all four hold, by different means: **a price move and the position
+correction it owes are one step.** ballast was the only one that let them separate.
+
+### The fix
+
+Two parts, `src/index.mjs`:
+
+1. **`repriceBuckets()`** — the repricing decision is taken once per pass, before
+   `recompute()`, from a single `performance.now()` reading, global bucket first
+   then each type bucket. `effectiveAvg` becomes a pure read. A pass now always
+   prices every row from one set of numbers. This is the part that fixes the
+   traced defect; it also removes a `performance.now()` + shrinkage computation
+   from the per-row path.
+2. **`priceFreeze`** — LegendList's mechanism. Prices are frozen while a declared
+   target is in flight (set in `declare()` and on head-change; cleared by
+   wheel/touchstart, or the finger would wedge them shut), and the release gets a
+   `requestAnimationFrame` pass of its own so the correction it owes is derived
+   from a settled geometry rather than appended to the pass that just landed.
+
+Worth stating plainly: the LegendList freeze **alone would not have fixed this**.
+The trace shows the reprice landing after `converging` had already gone false, so
+a snapshot scoped to the flight would have released before the damage. (1) is the
+fix; (2) is the belt, and the reason the release is now deterministic.
+
+### Verification
+
+| | before | after |
+|---|---|---|
+| 100k `jump-to-middle`, sync | 5/20 miss, 5k–698k px | **0/12 + 0/5, all 0–0.3px** |
+| 100k `jump-to-middle`, ro | 4/10 miss | **0/12 + 0/6** |
+| all four 10k accuracy axes, both gears | 0px | 0px |
+| `eff` at settle | 43.98 | 43.98 — repricing still happens, the position tracks it |
+
+Own suite, real Chrome: scrollup 0%/0% (sync/ro), scrollup `est=40` 0%/0%,
+fast-scroll 60px/f 0%, stream 50 0%·0px (ro) and 0% (sync). `stream rate=29 ro`
+first read 0.2%/114px, which is inside this axis's own noise — same-machine A/B,
+three runs each: before 0.2%/41px, 0.2%/40px, 0.1%/20px; after 0%/0px,
+0.2%/21px, 0%/0px.
+
+### OPEN: this repo's harness cannot arm the probe
+
+`bench/repriceprobe.mjs` encodes the invariant (`scrollTop` must equal
+`offsetOf(anchorKey)` once settled) and can drive the harness, but on the current
+corpora it reports `skip` on every run: they settle the averages during mount, so
+by the time any declaration can be made there is nothing left to reprice. Tried
+and failed to arm it — `mix=real` and `mix=wild`, 50k rows, declaring at 400ms /
+900ms / 5s after mount, and re-arming the quiet gate with a synthetic wheel event
+and sweeping the delay across 238–256ms. The averages were identical in every
+case. 100k is not available either: at ~270px/row the corpus needs 26.8M px and
+Chrome clamps `scrollHeight` at 2^24 = 16,777,216.
+
+The reproduction that does arm needs the average still *pinned* at the caller's
+estimate when the jump starts, which the TanStack app produces because it jumps
+within ~250ms of load, before the quiet gate has ever opened. That probe lives in
+`bench/tanstack-suite/repriceprobe.mjs` and is validated in both directions
+(2/10 misses on the pre-fix source, 0/6 after). A raw-CDP port against a real
+headed Chrome was written and discarded: the page loads too slowly, `eff` had
+already settled at 53.7 before the jump on both arms, and the probe passed
+against the known-broken source — recorded here because a probe that cannot fail
+is worse than no probe.
+
+So the harness owes a fast-mounting, uniform-row corpus before this class is
+guarded in-repo.

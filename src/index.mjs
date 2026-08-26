@@ -200,6 +200,21 @@ export function Ballast(props) {
   // retrying until the target is reached. Only INTENT signals (wheel/touch,
   // not scroll effects — those mix in our own writes) break it early.
   const converging = React.useRef(true)
+  // LegendList's mechanism, ported. There a programmatic scroll snapshots the
+  // per-type averages (`scrollingTo.averageSizeSnapshot`) and prices unmeasured
+  // rows from the snapshot for the whole scroll, so the destination cannot move
+  // under an in-flight jump. virtua reaches the same guarantee from the other
+  // side: it reprices exactly ONCE (median, latched off afterwards) and RETURNS
+  // the px displacement of the unmeasured rows above the viewport, which the
+  // caller applies as a scroll jump in the same operation. TanStack and
+  // Virtuoso sidestep it by never repricing at all. The invariant all of them
+  // hold: a price move and the position correction it owes are ONE step.
+  //
+  // Here the reference frame is a row identity, so freezing is enough — and the
+  // release gets a pass of its own, so the correction is always derived from a
+  // settled geometry rather than folded into the tail of the pass that landed.
+  const priceFreeze = React.useRef(true)
+  const rafRelease = React.useRef(null)
   const [win, setWin] = React.useState({ start: 0, end: -1 })
   const winRef = React.useRef(win)
   winRef.current = win
@@ -246,32 +261,67 @@ export function Ballast(props) {
   // global average, or the static estimate), so a type first encountered
   // mid-scroll is not a cliff — zero-initialized buckets made the first
   // per-type pricing a mass repricing event.
+  // READ ONLY. Whether a bucket's price MOVES is decided once per pass by
+  // repriceBuckets, never here.
   const effectiveAvg = (t, baseline) => {
     const b = bucketsRef.current.get(t)
-    if (!b || b.count === 0) return baseline
-    // Shrinkage toward the inherited baseline: the baseline counts as
-    // PRIOR_SAMPLES virtual samples, so a young bucket's mean is mostly
-    // baseline (1 real sample = 1/(1+K) weight) and the data takes over
-    // smoothly as samples accumulate. Replaces a hard min-count gate —
-    // same protection against single-sample noise, no cliff at the
-    // threshold crossing.
-    const raw =
-      (b.sum + PRIOR_SAMPLES * baseline) / (b.count + PRIOR_SAMPLES)
-    if (b.eff === 0) b.eff = baseline > 0 ? baseline : raw
-    if (
-      !converging.current &&
-      // ...and only while scrolling is QUIET: a repricing event moves every
-      // unmeasured offset at once, costing ~one frame at up-to-step-size
-      // deviation if it lands mid-scroll. A quarter second of scroll silence
-      // defers the same correction into frames nobody is watching. (Streams
-      // reprice freely — machinery echoes are not user events.)
-      performance.now() - lastUserEventT.current > 250 &&
-      Math.abs(raw - b.eff) > b.eff * 0.1
-    ) {
-      b.eff = raw
-      geoChanged.current = true
-    }
+    if (!b || b.count === 0 || b.eff === 0) return baseline
     return b.eff
+  }
+  // ONE repricing decision per pass, taken before the geometry is rebuilt, so
+  // a pass always prices every row from one set of numbers.
+  //
+  // This used to live inside effectiveAvg — i.e. inside recompute's O(N) row
+  // loop — and one of its gates is a CLOCK READING. A loop long enough to
+  // straddle the instant that gate opens repriced the tail of the list and not
+  // the head: the pass published a geometry that was internally inconsistent,
+  // restored scrollTop to that half-repriced anchor offset, and consumed
+  // geoChanged — so the NEXT pass, the one holding the consistent geometry,
+  // found the flag clear and never wrote. Traced at 100k rows: total 4,085,397
+  // published where the settled value was 4,398,651, anchorToKey left 313,254px
+  // short, permanently, in 5 of 20 runs. The odds scale with loop length (10k
+  // never reproduced it) and the gate re-crosses 250ms after every gesture, so
+  // this is a size-amplified race, not a large-list-only bug.
+  const repriceBuckets = () => {
+    // An estimatedItemSize FUNCTION is authoritative — nothing to reprice.
+    if (typeof estimatedItemSize === 'function') return
+    // Frozen while a declared target is in flight (see priceFreeze).
+    if (converging.current || priceFreeze.current) return
+    // Sampled ONCE per pass. Only while scrolling is QUIET: a repricing event
+    // moves every unmeasured offset at once, costing ~one frame at
+    // up-to-step-size deviation if it lands mid-scroll. A quarter second of
+    // scroll silence defers the same correction into frames nobody is watching.
+    // (Streams reprice freely — machinery echoes are not user events.) This is
+    // the reading whose mid-loop crossing was the bug above.
+    const quiet = performance.now() - lastUserEventT.current > 250
+    const settle = (b, baseline) => {
+      if (!b || b.count === 0) return baseline
+      // Shrinkage toward the inherited baseline: the baseline counts as
+      // PRIOR_SAMPLES virtual samples, so a young bucket's mean is mostly
+      // baseline (1 real sample = 1/(1+K) weight) and the data takes over
+      // smoothly as samples accumulate. Replaces a hard min-count gate —
+      // same protection against single-sample noise, no cliff at the
+      // threshold crossing.
+      const raw =
+        (b.sum + PRIOR_SAMPLES * baseline) / (b.count + PRIOR_SAMPLES)
+      if (b.eff === 0) b.eff = baseline > 0 ? baseline : raw
+      if (quiet && Math.abs(raw - b.eff) > b.eff * 0.1) {
+        b.eff = raw
+        geoChanged.current = true
+      }
+      return b.eff
+    }
+    // Global first: it is the baseline every type bucket shrinks toward, so it
+    // must settle before they read it.
+    const global = settle(
+      bucketsRef.current.get(GLOBAL_BUCKET),
+      estimatedItemSize,
+    )
+    if (getItemType) {
+      for (const [t, b] of bucketsRef.current) {
+        if (t !== GLOBAL_BUCKET) settle(b, global)
+      }
+    }
   }
   const estOf = (item, i) => {
     if (typeof estimatedItemSize === 'function')
@@ -549,6 +599,7 @@ export function Ballast(props) {
     // scrollTop write to cancel momentum or fight the finger.
     const heldAnchor =
       gestureHeld() && geo.current.keys.length > 0 ? anchorAt(el.scrollTop) : null
+    repriceBuckets()
     recompute()
     if (heldAnchor !== null) {
       const t = targetFor(heldAnchor, el)
@@ -605,6 +656,20 @@ export function Ballast(props) {
       Math.abs(el.scrollTop - target) <= CONVERGE_EPSILON_PX
     ) {
       converging.current = false
+      // Hold the prices one pass longer than the convergence itself, and give
+      // the release a pass of its own. Whatever the averages now owe is a
+      // geometry change in its own right, and the scrollTop it implies has to
+      // be derived and written by a pass that SEES the settled numbers — not
+      // appended to the pass that just landed, whose target predates them.
+      if (priceFreeze.current) {
+        if (rafRelease.current !== null) cancelAnimationFrame(rafRelease.current)
+        rafRelease.current = requestAnimationFrame(() => {
+          rafRelease.current = null
+          priceFreeze.current = false
+          geoChanged.current = true
+          syncRef.current()
+        })
+      }
     }
     // The window must cover the DESIRED position, not the stale scrollTop:
     // in end mode a newly appended tail row would otherwise never enter the
@@ -658,6 +723,7 @@ export function Ballast(props) {
     const head = data.length > 0 ? String(keyExtractor(data[0], 0)) : null
     if (head !== null && geo.current.keys.length > 0 && geo.current.keys[0] !== head) {
       converging.current = true
+      priceFreeze.current = true
     }
   }
 
@@ -716,6 +782,7 @@ export function Ballast(props) {
     () => () => {
       roRef.current?.disconnect()
       if (rafRetry.current !== null) cancelAnimationFrame(rafRetry.current)
+      if (rafRelease.current !== null) cancelAnimationFrame(rafRelease.current)
     },
     [],
   )
@@ -727,6 +794,9 @@ export function Ballast(props) {
   // (committed semantics; no blank flash on long jumps).
   const declare = (m) => {
     mode.current = m
+    // Freeze the prices for the flight: the destination is an offset in the
+    // geometry, and a reprice mid-flight moves it out from under the target.
+    priceFreeze.current = true
     userScrolledRef.current = false
     userAway.current = 0
     converging.current = true
@@ -863,6 +933,9 @@ export function Ballast(props) {
     // path back mid-stream (history: docs/RESULTS.md, wheel accumulator).
     const onWheel = (e) => {
       converging.current = false
+      // The declaration is over — the finger owns the viewport now. Leaving the
+      // prices frozen here would wedge them for the rest of the session.
+      priceFreeze.current = false
       if (e.deltaY < 0 && mode.current.kind === 'end' && el.scrollTop > 0) {
         mode.current = anchorAt(el.scrollTop)
         userAway.current = 0
@@ -941,6 +1014,7 @@ export function Ballast(props) {
     }
     const onTouchStart = () => {
       converging.current = false
+      priceFreeze.current = false
       // A second finger landing during the settle window re-opens the same
       // gesture rather than starting a new one: the adjustment the spacer is
       // carrying belongs to a frame that has not been handed back yet.
