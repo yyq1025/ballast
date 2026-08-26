@@ -178,6 +178,11 @@ const PREPEND_AT_END = params.get('at') === 'end'
 // mid-history and never went near the boundary, so it read a clean zero on a
 // case that slips 7 runs in 12.
 const PREPEND_AT_TOP = params.get('at') === 'top'
+// ?edge=tail — same batch, appended instead. Structurally this owes no
+// correction at all when anchored mid-history (rows below the anchor do not
+// move anything above it), so it is here to CHECK that claim rather than to
+// argue it.
+const PREPEND_TAIL = params.get('edge') === 'tail'
 // ?auto=0 — skip the scripted probe and load pages by hand instead. The
 // scripted run is over in seconds, which is the wrong shape for looking at it.
 const PREPEND_AUTO = params.get('auto') !== '0'
@@ -1387,12 +1392,12 @@ function usePrependMeasurement(findScrollEl) {
           if (!r) { paint(`anchor <span class="bad">LOST</span> — the view is no longer holding ${id}`); return }
           worst = Math.max(worst, Math.abs(r.getBoundingClientRect().top - top0))
           if (++n < 90) { requestAnimationFrame(tick); return }
-          const unpaid = Math.abs((sc.scrollHeight - sh0) - (sc.scrollTop - st0))
           paint(
             `anchor        <span class="${worst > 4 ? 'bad' : 'ok'}">${id} moved ${Math.round(worst)}px</span>\n` +
-            `grew above    ${Math.round(sc.scrollHeight - sh0)}px\n` +
-            `scrollTop paid ${Math.round(sc.scrollTop - st0)}px\n` +
-            `unpaid        <span class="${unpaid > 4 ? 'bad' : 'ok'}">${Math.round(unpaid)}px</span>`,
+            `content grew  ${Math.round(sc.scrollHeight - sh0)}px\n` +
+            `scrollTop     ${Math.round(sc.scrollTop - st0)}px\n` +
+            `— the anchor line is the verdict; the other two only agree with it\n` +
+            `  when ALL the growth was above the viewport.`,
           )
         }
         requestAnimationFrame(tick)
@@ -1497,13 +1502,16 @@ function usePrependMeasurement(findScrollEl) {
         if (++watch >= PREPEND_WATCH) {
           cur.shGrowthPx = Math.round(el.scrollHeight - shAtFire)
           cur.scrollTopDeltaPx = Math.round(el.scrollTop - scrollTopAtFire)
-          // The correction the batch created, and how much of it went unpaid.
-          // Unlike the shift metric this survives the anchor being lost, which
-          // is exactly the case where the shift metric goes quiet (there is no
-          // row left to measure) precisely when things are worst.
-          cur.compensationErrPx = PREPEND_AT_END
-            ? 0
-            : Math.abs(cur.shGrowthPx - cur.scrollTopDeltaPx)
+          // Only meaningful when the anchor was LOST — which is the case the
+          // shift metric cannot cover, since there is no row left to measure.
+          // Everywhere else it is both redundant with shift and WRONG: it
+          // assumes every pixel of growth sits above the viewport, so a tail
+          // append (growth below) or late measurement below the fold reads as
+          // a huge unpaid debt that was never owed. Reported as null rather
+          // than as a number nobody should trust.
+          cur.compensationErrPx = cur.anchorLost
+            ? Math.abs(cur.shGrowthPx - cur.scrollTopDeltaPx)
+            : null
           s.prependBatches.push(cur)
           batch++
           if (batch >= PREPEND_BATCHES) { finish(); return }
@@ -1555,7 +1563,7 @@ function hudPrepend(phase) {
     `anchor        <span class="${s.anchorLost ? 'bad' : 'ok'}">${s.anchorLost ? 'LOST' : 'held'}</span>` +
     `${s.anchorMissing ? ` (${s.anchorMissing} batch(es) had no row to anchor — not a failure)` : ''}\n` +
     `shift(PAINTED) <span class="${bad ? 'bad' : 'ok'}">max ${s.maxShiftPx}px residual ${s.residualPx}px — ${s.shiftFrames}/${s.watchFrames} frames</span>\n` +
-    `unpaid        <span class="${s.maxCompensationErrPx > 4 ? 'bad' : 'ok'}">${s.maxCompensationErrPx}px of growth uncompensated</span>` +
+    `unpaid        ${s.anchorLost ? `<span class="bad">${s.maxCompensationErrPx}px of growth uncompensated</span>` : "n/a (anchor held — read the shift line)"}` +
     `${stats.done ? '\n— DONE —' : ''}`
 }
 
@@ -2156,10 +2164,10 @@ function PrependHost({ render }) {
       const b = loaded++
       setState((prev) => {
         const add = makePrependBatch(n)
-        return {
-          data: [...add, ...prev.data],
-          ids: [...add.map((_, i) => `p${b}-${i}`), ...prev.ids],
-        }
+        const addIds = add.map((_, i) => `p${b}-${i}`)
+        return PREPEND_TAIL
+          ? { data: [...prev.data, ...add], ids: [...prev.ids, ...addIds] }
+          : { data: [...add, ...prev.data], ids: [...addIds, ...prev.ids] }
       })
     }
     return () => { delete window.__prepend }

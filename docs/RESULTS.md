@@ -401,8 +401,67 @@ Then, with `?at=top` added to the scripted axis (2 batches, 2 runs each):
 So the boundary is where TanStack's maturity shows, which is consistent with it
 carrying a dedicated prepend fix
 ([#1176](https://github.com/TanStack/virtual/pull/1176)); LegendList has a
-milder version of the same slip; proto's is the worst of the three. Open, not
-fixed, not worked around.
+milder version of the same slip; proto's was the worst of the three.
+
+### Cause, and the fix
+
+Tracing the anchor across the batch showed the same shape on every slipping run
+and none on the clean ones:
+
+```
+REANCHOR o0 → o0        off=0     st=0        (before the batch, harmless)
+REANCHOR o0 → p0-299    off=-460  st=76147    ← target was ~127856
+REANCHOR p0-299 → p0-299                      (held faithfully from here on)
+```
+
+The live-anchor refresh fired **in the middle of an unfinished correction** and
+froze the intermediate position as the new anchor. After that the engine is not
+malfunctioning at all — it holds `p0-299` exactly as asked, forever, which is
+why the slip never recovers. Not a clamp, and not the estimator.
+
+`userScrolledRef` is sticky and the user has to scroll to reach the top, so the
+refresh was armed the whole time. The refresh's other guard, `converging`,
+already means precisely "a correction is in flight, do not re-derive" — it was
+simply never set for a data change. Loading a page of history is a correction
+the size of the whole page, paid over several passes as those rows measure in;
+that is a convergence by any reading.
+
+The fix is one condition at the data-change site: **if the head key changed,
+converge.** It reuses machinery that already exists and is already tested, and
+it cannot wedge — every gesture path (wheel, touch, dead-anchor fallback)
+clears `converging`, so a user who scrolls takes the viewport back at once.
+
+| proto, `scrollTop = 0`, 300 rows, 12 runs | slipped |
+|---|---|
+| before | **7 / 12** |
+| after | **0 / 12** |
+
+Scripted `?at=top` agrees (anchor LOST on both runs before, held on both after),
+the `?nokey=1` control still goes red, and the scroll-up axis is unchanged
+(`paintedJumpFrames: 0`), so nothing else moved.
+
+### The tail side does not need the mirror of this
+
+`?edge=tail` appends the same batch instead. Rows arriving below the anchor move
+nothing above it, so no correction is owed and there is nothing to converge
+toward — and `{kind:'end'}` mode, which *does* owe a large correction as the tail
+grows, is immune to this particular bug by construction: the live-anchor refresh
+only runs for `kind === 'anchor'`. Measured rather than argued:
+
+| proto, `?edge=tail` | shift |
+|---|---|
+| mid-history | 0px |
+| pinned at end | 0px |
+| at top | 0px |
+
+**A metric that had to be withdrawn.** `unpaid` was defined as
+`|Δ scrollHeight − Δ scrollTop|`, which silently assumes every pixel of growth
+sits *above* the viewport. That holds only for a head batch with measurement
+already settled. A tail append reads 88–93k px of "unpaid debt" that was never
+owed, and so does a head batch whose rows are still measuring in below the fold
+— it was misleading me within minutes of being written. It is now reported only
+when the anchor was LOST, which is the one case the shift metric cannot cover,
+and `n/a` otherwise.
 
 **A hypothesis this falsified.** The first reading pointed at the estimator:
 `?type=0` (no per-type average refinement) read a clean zero, so per-type

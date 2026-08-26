@@ -578,6 +578,29 @@ export function Ballast(props) {
   if (prevData.current !== data) {
     prevData.current = data
     geoChanged.current = true
+    // HEAD CHANGE (loading older history, or trimming it). Rows arrived above
+    // everything currently placed, so the restore owes a correction the size
+    // of the whole new page — hundreds of thousands of px, paid across several
+    // passes as those rows measure in. That is a CONVERGENCE, and treating it
+    // as one is what stops the live-anchor refresh from re-deriving the anchor
+    // from a scrollTop that is still mid-flight.
+    //
+    // Measured before this: loading 300 older rows from scrollTop 0 slipped
+    // the view one row in 7 runs of 12, permanently. The trace showed the
+    // refresh firing at scrollTop 76147 of a ~127856 target and rewriting the
+    // anchor from `o0` to `p0-299` — after which the engine held the wrong row
+    // faithfully forever. `userScrolledRef` is sticky and the user must scroll
+    // to reach the top, so the refresh was armed the whole time; the missing
+    // piece was never the echo test, it was that a correction this large is
+    // not a single write.
+    //
+    // Safe against wedging: every gesture path already clears `converging`
+    // (wheel, touch, and the dead-anchor fallback), so a user who scrolls
+    // takes the viewport back immediately.
+    const head = data.length > 0 ? String(keyExtractor(data[0], 0)) : null
+    if (head !== null && geo.current.keys.length > 0 && geo.current.keys[0] !== head) {
+      converging.current = true
+    }
   }
 
   // Runs BEFORE this commit's DOM mutations (the useInsertionEffect
