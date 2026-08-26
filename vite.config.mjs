@@ -9,6 +9,9 @@ export default {
   server: {
     port: 5490,
     strictPort: true,
+    // LAN-exposed so a phone on the same Wi-Fi can hand-test touch feel
+    // (http://<mac-ip>:5490/harness/…).
+    host: true,
     // crossOriginIsolated === true so the page can call
     // performance.measureUserAgentSpecificMemory() (memory scenario).
     headers: {
@@ -29,4 +32,37 @@ export default {
     ],
   },
 
+  plugins: [
+    {
+      // Freshness stamp for on-device testing: injects the newest mtime of
+      // the engine + harness into a corner badge, re-read on every request,
+      // so a phone can tell at a glance whether it reloaded the latest edit.
+      name: 'harness-stamp',
+      async transformIndexHtml(html) {
+        const { statSync } = await import('node:fs')
+        const t = Math.max(
+          ...['src/index.mjs', 'harness/index.html'].map(
+            (p) => statSync(new URL(p, import.meta.url)).mtimeMs,
+          ),
+        )
+        const stamp = new Date(t).toLocaleTimeString('en-GB')
+        return {
+          html,
+          tags: [
+            {
+              tag: 'div',
+              attrs: {
+                style:
+                  'position:fixed;right:4px;bottom:4px;z-index:99999;' +
+                  'background:rgba(0,0,0,.7);color:#9ad;font:10px monospace;' +
+                  'padding:2px 6px;border-radius:4px;pointer-events:none',
+              },
+              children: `build ${stamp}`,
+              injectTo: 'body',
+            },
+          ],
+        }
+      },
+    },
+  ],
 }

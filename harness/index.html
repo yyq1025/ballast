@@ -1,5 +1,6 @@
 <!doctype html>
 <meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>tanstack-virtual streaming tail flicker repro</title>
 <style>
   * { box-sizing: border-box; }
@@ -10,7 +11,7 @@
   body.light .msg pre { background: #f6f6f8; }
   .bench-chat { flex: 1; min-height: 0; }
   body.cv .cvrow { content-visibility: auto; contain-intrinsic-size: auto 80px; }
-  #root { display: flex; flex-direction: column; height: 100vh; }
+  #root { display: flex; flex-direction: column; height: 100dvh; }
   .transcript { flex: 1; overflow-y: auto; contain: strict; }
   .msg { padding: 10px 18px; border-bottom: 1px solid #232323; font-size: 14px; line-height: 1.5; }
   .msg .role { color: #7a7a7a; font-size: 11px; margin-bottom: 4px; text-transform: uppercase; }
@@ -56,6 +57,88 @@ const params = new URLSearchParams(location.search)
 //   ?est=N|kind            estimateSize override: fixed px, or per-kind
 //                          heuristic (mix=real only) like a production integration
 //   ?step=N                scrollup px per frame (default 10)
+// ?probe=1 — on-device jump forensics: shadows the scrollTop setter to tag
+// JS writers (with their top stack frame) and shows the last few large
+// position jumps in a fixed overlay. Splits "some code wrote scrollTop"
+// from "the browser moved it on its own" (URL-bar resize, clamp, anchoring)
+// without a tethered debugger.
+if (params.get('probe') === '1') {
+  const overlay = document.createElement('div')
+  overlay.style.cssText =
+    'position:fixed;left:4px;top:4px;z-index:99999;background:rgba(0,0,0,.85);' +
+    'color:#7fdc7f;font:10px/1.5 monospace;padding:6px 8px;border-radius:6px;' +
+    'pointer-events:none;max-width:88vw;white-space:pre-wrap'
+  overlay.textContent = 'probe armed'
+  document.body.appendChild(overlay)
+  const writes = []
+  const record = (kind) => {
+    const frame = (new Error().stack || '').split('\n')[3]?.trim().slice(0, 60) || '?'
+    writes.push({ t: performance.now(), kind, frame })
+    if (writes.length > 40) writes.shift()
+  }
+  const desc = Object.getOwnPropertyDescriptor(Element.prototype, 'scrollTop')
+  Object.defineProperty(Element.prototype, 'scrollTop', {
+    get() { return desc.get.call(this) },
+    set(v) {
+      record('set')
+      desc.set.call(this, v)
+    },
+    configurable: true,
+  })
+  // scrollTo()/scrollBy()/scrollIntoView() bypass the setter — patch the
+  // methods too or a spring/scroll-to-message writer reads as "browser".
+  for (const [proto, name] of [
+    [Element.prototype, 'scrollTo'], [Element.prototype, 'scrollBy'],
+    [Element.prototype, 'scrollIntoView'], [window, 'scrollTo'], [window, 'scrollBy'],
+  ]) {
+    const orig = proto[name]
+    if (!orig) continue
+    proto[name] = function (...args) {
+      record(name)
+      return orig.apply(this, args)
+    }
+  }
+  const lines = []
+  let lastST = null
+  let lastH = null
+  let tracked = null
+  const note = (s) => {
+    lines.push(s)
+    if (lines.length > 5) lines.shift()
+    overlay.textContent = lines.join('\n')
+  }
+  setInterval(() => {
+    if (!tracked) {
+      tracked = [...document.querySelectorAll('*')].filter((e) => {
+        const st = getComputedStyle(e)
+        return /(auto|scroll)/.test(st.overflowY) && e.scrollHeight > e.clientHeight + 500
+      }).sort((a, b) => b.scrollHeight - a.scrollHeight)[0]
+      if (tracked) {
+        let lastSH = tracked.scrollHeight
+        tracked.addEventListener('scroll', () => {
+          const st = desc.get.call(tracked)
+          const sh = tracked.scrollHeight
+          if (lastST !== null && Math.abs(st - lastST) > 60) {
+            const now = performance.now()
+            const w = writes.filter((x) => now - x.t < 120).pop()
+            // Δsh separates "content above reflowed and the browser clamped
+            // or anchored" (sh moved with it) from "pure position move".
+            note(
+              `Δ${Math.round(st - lastST)}px Δsh${Math.round(sh - lastSH)} ch${tracked.clientHeight} ` +
+                (w ? `JS ${w.kind}: ${w.frame}` : 'no JS writer (browser)'),
+            )
+          }
+          lastST = st
+          lastSH = sh
+        }, { passive: true })
+      }
+    } else {
+      const h = tracked.clientHeight
+      if (lastH !== null && h !== lastH) note(`viewport resize ${lastH}→${h}`)
+      lastH = h
+    }
+  }, 300)
+}
 const RV_VER = params.get('rv') || '3.14.10'
 const RATE = Number(params.get('rate') || 35)
 const USE_TRANSITION = params.get('transition') === '1'
@@ -517,7 +600,7 @@ function LegendStreamApp() {
     </div>
   `, [last])
   return html`
-    <div style=${{ height: '100vh' }}>
+    <div style=${{ height: '100dvh' }}>
       <${LegendList}
         data=${messages}
         keyExtractor=${(_item, i) => String(i)}
@@ -568,7 +651,7 @@ function ProtoStreamApp() {
     </div>
   `, [last])
   return html`
-    <div style=${{ height: '100vh' }}>
+    <div style=${{ height: '100dvh' }}>
       <${ProtoList}
         measureMode=${params.get('measure') || 'sync'}
         data=${messages}
@@ -632,7 +715,7 @@ function VirtuaStreamApp() {
 
   const last = messages.length - 1
   return html`
-    <div style=${{ height: '100vh' }}>
+    <div style=${{ height: '100dvh' }}>
       <${Virtua.VList}
         ref=${ref}
         data=${messages}
@@ -750,7 +833,7 @@ function VirtuaPinApp() {
 
   const data = React.useMemo(() => [...state.msgs, '__blank__'], [state.msgs])
   return html`
-    <div style=${{ height: '100vh' }}>
+    <div style=${{ height: '100dvh' }}>
       <${Virtua.VList}
         ref=${ref}
         data=${data}
@@ -822,7 +905,7 @@ function VirtuosoStreamApp() {
     </div>
   `, [])
   return html`
-    <div style=${{ height: '100vh' }}>
+    <div style=${{ height: '100dvh' }}>
       <${Virtuoso.VirtuosoMessageListLicense} licenseKey="">
         <${Virtuoso.VirtuosoMessageList}
           style=${{ height: '100%' }}
@@ -1241,7 +1324,7 @@ function RestTanstack({ messages, items: realItems }) {
   useMeasure(() => parentRef.current)
   const items = virtualizer.getVirtualItems()
   return html`
-    <div class="transcript" ref=${parentRef} style=${{ height: '100vh' }}>
+    <div class="transcript" ref=${parentRef} style=${{ height: '100dvh' }}>
       <div style=${{ height: virtualizer.getTotalSize(), width: '100%', position: 'relative' }}>
         ${items.map((vi) => html`
           <div
@@ -1308,7 +1391,7 @@ function RestLegend({ messages, items: realItems }) {
     </div>
   `, [realItems])
   return html`
-    <div style=${{ height: '100vh' }}>
+    <div style=${{ height: '100dvh' }}>
       <${LegendList}
         data=${data}
         keyExtractor=${(_item, i) => String(i)}
@@ -1338,7 +1421,7 @@ function RestVirtua({ messages, items: realItems }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
   return html`
-    <div style=${{ height: '100vh' }}>
+    <div style=${{ height: '100dvh' }}>
       <${Virtua.VList} ref=${ref} data=${data} itemSize=${est} style=${{ height: '100%' }}>
         ${(item, index) => html`
           <div class="msg" key=${index}>
@@ -1369,7 +1452,7 @@ function RestProto({ messages, items: realItems }) {
     </div>
   `, [realItems])
   return html`
-    <div style=${{ height: '100vh' }}>
+    <div style=${{ height: '100dvh' }}>
       <${ProtoList}
         measureMode=${params.get('measure') || 'sync'}
         apiRef=${apiRef}
@@ -1403,7 +1486,7 @@ function RestVirtuoso({ messages, items: realItems }) {
     </div>
   `, [realItems])
   return html`
-    <div style=${{ height: '100vh' }}>
+    <div style=${{ height: '100dvh' }}>
       <${Virtuoso.VirtuosoMessageListLicense} licenseKey="">
         <${Virtuoso.VirtuosoMessageList}
           style=${{ height: '100%' }}
@@ -1425,7 +1508,7 @@ function RestAstryx({ messages, items }) {
     : SCENARIO === 'scrollup' ? useScrollupMeasurement : useRestMeasurement
   useMeasure(findChatScrollEl)
   return html`
-    <div style=${{ height: '100vh', display: 'flex', flexDirection: 'column' }}>
+    <div style=${{ height: '100dvh', display: 'flex', flexDirection: 'column' }}>
       <${Chat.ChatLayout} className="bench-chat">
         <${Chat.ChatMessageList} gap=${3}>
           ${items
@@ -1678,7 +1761,7 @@ function ChatLayoutApp() {
   // grows); their own stories constrain it with a fixed-height flex column, so
   // the arm does the same or the measurement would be reading document scroll.
   return html`
-    <div style=${{ height: '100vh', display: 'flex', flexDirection: 'column' }}>
+    <div style=${{ height: '100dvh', display: 'flex', flexDirection: 'column' }}>
       <${Chat.ChatLayout}
         composer=${composer}
         scrollButton=${VIRT ? html`<${VirtScrollButton} apiRef=${virtApiRef} scrollElRef=${virtScrollElRef} />` : undefined}
@@ -1757,12 +1840,12 @@ function LogStreamApp() {
 
   useStreamMeasurement()
 
-  return html`<div style=${{ height: '100vh', display: 'flex', flexDirection: 'column' }}>
+  return html`<div style=${{ height: '100dvh', display: 'flex', flexDirection: 'column' }}>
     <${LabLogStream}
       entries=${entries}
       isFollowing=${following}
       onFollowChange=${onFollowChange}
-      maxHeight="100vh"
+      maxHeight="100dvh"
     />
   </div>`
 }
