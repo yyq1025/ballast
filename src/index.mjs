@@ -766,8 +766,12 @@ export function Ballast(props) {
           continue
         }
         if (measureModeRef.current !== 'ro') continue
+        // Border box, the same box the sync path reads with offsetHeight —
+        // one cache, one definition of a row's size. contentRect is NOT that
+        // box (it drops padding and border), so a padded row would be cached
+        // short for as long as the fallback is the writer.
         const px =
-          entry.borderBoxSize?.[0]?.blockSize ?? entry.contentRect.height
+          entry.borderBoxSize?.[0]?.blockSize ?? entry.target.offsetHeight
         const prev = sizes.current.get(key)
         if (px > 0 && prev !== px) {
           noteMeasured(key, prev, px)
