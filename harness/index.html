@@ -62,6 +62,82 @@ const params = new URLSearchParams(location.search)
 // position jumps in a fixed overlay. Splits "some code wrote scrollTop"
 // from "the browser moved it on its own" (URL-bar resize, clamp, anchoring)
 // without a tethered debugger.
+// ?blank=1 — on-device readout for "flick to the top and part of the screen goes
+// blank". Synthetic touch in a desktop engine has no real momentum and desktop
+// rows are far cheaper than a phone's, so this reads the two candidate causes
+// straight off the device instead: how much viewport was uncovered and for how
+// long, and whether the top spacer hit its clamp (the engine cannot absorb a
+// gesture correction at the very top — there is no spacer left). Works in any
+// scenario. `window.__bt` opts the engine's clamp counter in.
+if (params.get('blank') === '1') {
+  window.__bt = []
+  const o = document.createElement('div')
+  o.style.cssText =
+    'position:fixed;left:4px;top:4px;z-index:99999;background:rgba(0,0,0,.88);' +
+    'color:#7fdc7f;font:11px/1.5 monospace;padding:8px 10px;border-radius:6px;' +
+    'pointer-events:none;max-width:92vw;white-space:pre-wrap'
+  document.body.appendChild(o)
+  let frames = 0, blank = 0, maxStrip = 0, run = 0, maxRun = 0, worstAt = 0
+  const find = () => {
+    let best = null
+    for (const d of document.querySelectorAll('div')) {
+      if (d.scrollHeight > d.clientHeight + 10) {
+        const oy = getComputedStyle(d).overflowY
+        if ((oy === 'auto' || oy === 'scroll') && (!best || d.scrollHeight > best.scrollHeight)) best = d
+      }
+    }
+    return best
+  }
+  const tick = () => {
+    const sc = find()
+    if (sc) {
+      const b = sc.getBoundingClientRect()
+      // Intersect with the visible window: elementFromPoint returns null for
+      // anything off-screen, and a scroller that overflows the window (100dvh
+      // under a browser chrome that lies about it) would read as 100% blank.
+      // It did, on the first run — 99.9%.
+      const r = {
+        left: b.left,
+        width: b.width,
+        top: Math.max(0, b.top),
+        bottom: Math.min(window.innerHeight, b.bottom),
+      }
+      r.height = Math.max(0, r.bottom - r.top)
+      const hit = (y) => {
+        const n = document.elementFromPoint(r.left + r.width / 2, y)
+        return !!(n && n.closest && n.closest('.msg, .cvrow'))
+      }
+      let miss = 0
+      if (r.height < 40) { requestAnimationFrame(tick); return }
+      // Sample the middle 90% and require TWO misses. The very top and bottom
+      // edge pixels are where a spacer/row seam lands, so an 8px seam that no
+      // one can see was reading as a 100%-blank frame on the first attempt.
+      // What is being counted here is a blank AREA, which is what the report
+      // was about.
+      for (let k = 0; k < 5; k++) if (!hit(r.top + r.height * (0.05 + 0.225 * k))) miss++
+      frames++
+      if (miss >= 2) {
+        blank++
+        run++
+        maxRun = Math.max(maxRun, run)
+        let strip = 0
+        while (strip < 1200 && !hit(r.top + 2 + strip)) strip += 6
+        if (strip > maxStrip) { maxStrip = strip; worstAt = Math.round(sc.scrollTop) }
+      } else run = 0
+      const cl = window.__bt.filter((e) => e.t === 'CLAMP')
+      o.textContent =
+        `BLANK PROBE   scrollTop ${Math.round(sc.scrollTop)}\n` +
+        `blank frames  ${blank}/${frames} (${((100 * blank) / Math.max(1, frames)).toFixed(1)}%)\n` +
+        `longest run   ${maxRun} frames  (~${Math.round((maxRun / 60) * 1000)}ms)\n` +
+        `worst strip   ${maxStrip}px  at scrollTop ${worstAt}\n` +
+        `spacer clamp  ${cl.length}x  max lost ${cl.reduce((a, c) => Math.max(a, c.lost), 0)}px\n` +
+        `(tap-hold to read; reload to reset)`
+    }
+    requestAnimationFrame(tick)
+  }
+  requestAnimationFrame(tick)
+}
+
 if (params.get('probe') === '1') {
   const overlay = document.createElement('div')
   overlay.style.cssText =

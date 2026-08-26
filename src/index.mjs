@@ -347,7 +347,11 @@ export function Ballast(props) {
     // gestureAdj shifts the whole window block without touching scrollTop
     // (0 outside a touch gesture). Clamped at the very top of the list —
     // there is no spacer left to absorb into there.
-    const top = empty ? 0 : Math.max(0, g.offsets[w.start] + gestureAdj.current)
+    const rawTop = empty ? 0 : g.offsets[w.start] + gestureAdj.current
+    if (typeof window !== 'undefined' && window.__bt && rawTop < 0) {
+      window.__bt.push({ t: 'CLAMP', lost: Math.round(-rawTop), adj: Math.round(gestureAdj.current), off: Math.round(g.offsets[w.start]), start: w.start })
+    }
+    const top = empty ? 0 : Math.max(0, rawTop)
     const belowEnd = empty
       ? 0
       : w.end + 1 < g.offsets.length
