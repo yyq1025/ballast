@@ -314,3 +314,72 @@ One coverage note: the gate is behind `isIOSWebKit()` (UA regex plus the
 iPadOS `MacIntel && maxTouchPoints > 0` case), so **Android touch does not take
 the deferral path at all**. The gate here is on touch events themselves, with no
 UA test — see § 7.
+
+## 8. 2026-08-25: the prepend axis (load-older history), and a negative result
+
+Every other axis here drives the SCROLL and asks whether content held still.
+This one holds the scroll still and changes the DATA underneath it: land, climb
+`?uppx=` into history, wait for measurement to go quiet, then insert `?prepend=`
+rows at the FRONT and watch the anchored row for `?watch=` frames.
+
+Two things had to be built before it could measure anything:
+
+- **Stable row identity.** Every other arm in this harness keys by array index,
+  which cannot express a prepend at all — inserting at the front renumbers every
+  key, so the anchor names a different row and the arm measures React
+  reconciliation instead of the virtualizer. The prepend arms carry `o*` /
+  `p<batch>-*` ids and pass them to each library's own key hook
+  (`keyExtractor`, `getItemKey`).
+- **An address, not a node ref.** The probe finds the anchor each frame by the
+  `data-pid` painted on the row. A recycling list may hand the same DOM node to
+  a different row and an absolute arm may unmount and remount it; either would
+  silently invalidate a held reference and turn a real defect into a quiet zero.
+
+### The falsification arm
+
+`?nokey=1` keys by index instead — the careless-integration case. It exists
+because an axis that reads zero everywhere is not measuring anything, and this
+is the arm that must read large. It does:
+
+| proto | anchor | painted shift | growth above | scrollTop paid | unpaid |
+|---|---|---|---|---|---|
+| stable ids | held | 0px | 81–91k px | 81–91k px | **0–1px** |
+| `?nokey=1` | **LOST** every batch | — | 93345px | **0px** | **93345px** |
+
+The stable-id run pays the correction to the pixel, three batches running. The
+control pays none of it, loses the anchor every time, and the anchor the probe
+picks slides backwards through history each batch (`o1189` → `o889` → `o589`)
+because the viewport is drifting through content that is no longer being held.
+`unpaid` (growth above the viewport minus the scrollTop actually spent) is the
+metric that survives the anchor being lost — the shift metric goes quiet exactly
+when things are worst, because there is no row left to measure.
+
+### The result: nobody fails this
+
+Gecko, `mix=wild`, size 1200, 3 batches × 300 rows, anchored mid-history:
+
+| arm | anchor | painted shift | unpaid |
+|---|---|---|---|
+| proto | held | 0px | 0–1px |
+| proto, `?at=end` (prepend while pinned) | held | 0px | 0px |
+| tanstack `overscan=12 ddu=1` | held | 0px | 0px |
+| legend | held | 0px | 0px |
+
+**This axis does not differentiate, and that is the finding.** Prepend is a
+solved problem in all three — which is consistent with TanStack shipping a
+dedicated fix for it ([#1176](https://github.com/TanStack/virtual/pull/1176),
+eager `scrollOffset` adjust on prepend) and LegendList shipping
+`maintainVisibleContentPosition`. It belongs in this document as *covered*, not
+as an advantage, and nothing about it should reach a PR description as a
+competitive claim. The differentiator remains touch (§ 7).
+
+One asymmetry worth naming rather than averaging away: the arms do not pay
+equally sized corrections. TanStack's growth is exactly 300 × 60px — the
+estimate — because it never measures rows that are far above the window, so it
+defers that work to the scroll-up path (§ 1) instead of paying it at insert
+time. proto and legend absorb 81–106k px at insert. Each arm pays whatever
+correction it creates, exactly; they simply create different ones.
+
+**Not covered:** prepend arriving *during* a touch gesture, where the write-gate
+and `gestureAdj` would have to compose with the batch. That combination has
+never been driven and is not claimed anywhere.

@@ -165,6 +165,15 @@ const DDU = params.get('ddu') === '1'
 // ?dur=ms — stream scenario runtime (default 30s). Longer runs let interaction
 // probes take many samples inside one streaming window.
 const DUR = Number(params.get('dur') || 30000)
+// scenario=prepend — history load-older. ?prepend=N rows per batch,
+// ?batches=K batches, ?uppx=P how far to scroll up into history before the
+// first batch (0 with ?at=end keeps the view pinned at the bottom instead),
+// ?watch=F frames to sample the anchor for after each batch.
+const PREPEND_N = Number(params.get('prepend') || 300)
+const PREPEND_BATCHES = Number(params.get('batches') || 3)
+const PREPEND_UPPX = Number(params.get('uppx') || 4000)
+const PREPEND_WATCH = Number(params.get('watch') || 90)
+const PREPEND_AT_END = params.get('at') === 'end'
 const { useVirtualizer } = await import(
   '@tanstack/react-virtual'
 )
@@ -1296,6 +1305,165 @@ function hudScrollup(phase) {
     `blank(PAINTED) <span class="${s.blankFrames ? 'bad' : 'ok'}">${s.blankFrames} (${s.blankPct}%) max ${s.blankMaxProbes}/5 probes; miss/probe=${s.probeMiss.join('/')}; top strip avg ${s.blankTopAvgPx}px max ${s.blankTopMaxPx}px</span>${stats.done ? '\n— DONE —' : ''}`
 }
 
+// scenario=prepend — load-older-history. Everything else in this harness drives
+// the SCROLL and asks whether content held still; this axis holds the scroll
+// still and changes the DATA underneath it. The anchor is addressed by the
+// stable id painted on each row (`data-pid`), never by DOM node identity: a
+// recycling list may hand the same node to another row, and an absolute arm may
+// unmount and remount it, both of which would silently invalidate a node ref.
+function usePrependMeasurement(findScrollEl) {
+  React.useEffect(() => {
+    const MAX_MS = 40000
+    let raf, cachedEl = null
+    let phase = 'land'
+    let stable = 0, quiet = 0, watch = 0
+    let startT = 0
+    let batch = 0
+    let travelled = 0
+    const s = stats
+    s.prependBatches = []
+    let anchorId = null, anchorTop0 = 0, cur = null
+    let prevSh = 0, shAtFire = 0, scrollTopAtFire = 0
+    const pinErr = (el) => el.scrollHeight - el.clientHeight - el.scrollTop
+    const rowFor = (id) => document.querySelector(`[data-pid="${id}"]`)
+
+    const finish = () => {
+      s.done = true
+      hudPrepend('DONE')
+      console.log('[bench] PREPEND done', JSON.stringify(summarizePrepend()))
+    }
+
+    const fire = (el) => {
+      // Anchor on the row at the viewport midline (mid-history), or on the
+      // bottom edge itself when the run is testing prepend-while-pinned.
+      if (PREPEND_AT_END) {
+        anchorId = null
+        anchorTop0 = pinErr(el)
+      } else {
+        const cr = el.getBoundingClientRect()
+        const node = document.elementFromPoint(cr.left + cr.width / 2, cr.top + cr.height / 2)
+        const row = node && node.closest ? node.closest('[data-pid]') : null
+        anchorId = row ? row.getAttribute('data-pid') : null
+        anchorTop0 = row ? row.getBoundingClientRect().top : 0
+      }
+      shAtFire = el.scrollHeight
+      scrollTopAtFire = el.scrollTop
+      cur = {
+        batch: batch + 1,
+        anchor: anchorId ?? '(bottom-edge)',
+        watchFrames: 0,
+        shiftFrames: 0,
+        maxShiftPx: 0,
+        residualPx: 0,
+        anchorLost: false,
+      }
+      window.__prepend(PREPEND_N)
+    }
+
+    const sample = (el) => {
+      cur.watchFrames++
+      let dev
+      if (PREPEND_AT_END) {
+        dev = Math.abs(pinErr(el) - anchorTop0)
+      } else {
+        const row = anchorId ? rowFor(anchorId) : null
+        if (!row) { cur.anchorLost = true; return }
+        dev = Math.abs(row.getBoundingClientRect().top - anchorTop0)
+      }
+      if (dev > 4) { cur.shiftFrames++; cur.maxShiftPx = Math.max(cur.maxShiftPx, Math.round(dev)) }
+      cur.residualPx = Math.round(dev)
+    }
+
+    const loop = () => {
+      window.__prep = { phase, batch, hasEl: !!cachedEl }
+      const el = cachedEl ?? (cachedEl = findScrollEl())
+      if (!el || el.scrollHeight <= el.clientHeight) { raf = requestAnimationFrame(loop); return }
+      if (performance.now() - startT >= MAX_MS && startT) { finish(); return }
+
+      if (phase === 'land') {
+        const pe = pinErr(el)
+        if (pe > 4) { el.scrollTop = el.scrollHeight; stable = 0 } else stable++
+        if (stable >= 30) {
+          startT = performance.now()
+          prevSh = el.scrollHeight
+          phase = PREPEND_AT_END || PREPEND_UPPX <= 0 ? 'quiet' : 'up'
+        }
+      } else if (phase === 'up') {
+        el.scrollTop = Math.max(0, el.scrollTop - STEP)
+        travelled += STEP
+        if (travelled >= PREPEND_UPPX || el.scrollTop <= 0) { phase = 'quiet'; quiet = 0 }
+      } else if (phase === 'quiet') {
+        // Let measurement settle before firing, so what the batch causes is not
+        // confused with corrections the scroll-up was still paying off.
+        const sh = el.scrollHeight
+        if (Math.abs(sh - prevSh) > 2) quiet = 0; else quiet++
+        prevSh = sh
+        if (quiet >= 20) { fire(el); phase = 'watch'; watch = 0 }
+      } else if (phase === 'watch') {
+        sample(el)
+        if (++watch >= PREPEND_WATCH) {
+          cur.shGrowthPx = Math.round(el.scrollHeight - shAtFire)
+          cur.scrollTopDeltaPx = Math.round(el.scrollTop - scrollTopAtFire)
+          // The correction the batch created, and how much of it went unpaid.
+          // Unlike the shift metric this survives the anchor being lost, which
+          // is exactly the case where the shift metric goes quiet (there is no
+          // row left to measure) precisely when things are worst.
+          cur.compensationErrPx = PREPEND_AT_END
+            ? 0
+            : Math.abs(cur.shGrowthPx - cur.scrollTopDeltaPx)
+          s.prependBatches.push(cur)
+          batch++
+          if (batch >= PREPEND_BATCHES) { finish(); return }
+          phase = 'quiet'; quiet = 0; prevSh = el.scrollHeight
+        }
+      }
+      hudPrepend(phase)
+      raf = requestAnimationFrame(loop)
+    }
+    raf = requestAnimationFrame(loop)
+    return () => cancelAnimationFrame(raf)
+  }, [])
+}
+
+function summarizePrepend() {
+  const b = stats.prependBatches || []
+  const max = (f) => b.reduce((a, x) => Math.max(a, x[f] || 0), 0)
+  return {
+    config: {
+      list: LIST, mix: MIX, size: SIZE, est: EST || 'default',
+      rows: PREPEND_N, batches: PREPEND_BATCHES,
+      at: PREPEND_AT_END ? 'end' : `up${PREPEND_UPPX}`,
+      watch: PREPEND_WATCH,
+    },
+    batchesDone: b.length,
+    // The headline: did the anchored row hold its painted position while the
+    // rows above it changed? residual is what is still owed once the dust
+    // settles, max is the worst single frame in between.
+    maxShiftPx: max('maxShiftPx'),
+    residualPx: max('residualPx'),
+    shiftFrames: b.reduce((a, x) => a + (x.shiftFrames || 0), 0),
+    watchFrames: b.reduce((a, x) => a + (x.watchFrames || 0), 0),
+    anchorLost: b.some((x) => x.anchorLost),
+    // How much of the growth above the viewport was never compensated for.
+    maxCompensationErrPx: max('compensationErrPx'),
+    batches: b,
+  }
+}
+
+function hudPrepend(phase) {
+  const el = document.getElementById('hud')
+  const s = summarizePrepend()
+  const bad = s.maxShiftPx > 4 || s.anchorLost
+  el.innerHTML =
+    `prepend list=${s.config.list} mix=${s.config.mix} size=${s.config.size} est=${s.config.est}${PREPEND_NOKEY ? ' NOKEY(control)' : ''}\n` +
+    `batch         ${s.batchesDone}/${s.config.batches} × ${s.config.rows} rows @ ${s.config.at}\n` +
+    `phase         ${phase}\n` +
+    `anchor        <span class="${s.anchorLost ? 'bad' : 'ok'}">${s.anchorLost ? 'LOST' : 'held'}</span>\n` +
+    `shift(PAINTED) <span class="${bad ? 'bad' : 'ok'}">max ${s.maxShiftPx}px residual ${s.residualPx}px — ${s.shiftFrames}/${s.watchFrames} frames</span>\n` +
+    `unpaid        <span class="${s.maxCompensationErrPx > 4 ? 'bad' : 'ok'}">${s.maxCompensationErrPx}px of growth uncompensated</span>` +
+    `${stats.done ? '\n— DONE —' : ''}`
+}
+
 function hudReflow(phase) {
   const el = document.getElementById('hud')
   const s = stats
@@ -1863,8 +2031,156 @@ function LogStreamApp() {
   </div>`
 }
 
+// ---- scenario=prepend -------------------------------------------------------
+// The other scenarios key rows by ARRAY INDEX, which cannot express a prepend:
+// inserting at the front renumbers every key, so the anchor would name a
+// different row and the arm would measure React reconciliation rather than the
+// virtualizer. These arms carry a stable id per row instead — `o*` for the
+// initial corpus, `p<batch>-*` for each loaded page — and paint it as
+// `data-pid` so the probe can find the anchor without holding a node ref.
+function makePrependBatch(n) {
+  return MIX === 'wild' ? makeWildItems(n) : MIX === 'real' ? makeItems(n) : makeMessages(n)
+}
+
+// ?nokey=1 — control arm: key by array index instead, the way the rest of this
+// harness (and a careless integration) does. Prepending then renumbers every
+// key, so identity anchoring has nothing to hold on to. It exists to falsify
+// the probe: an axis that reads zero everywhere is not measuring anything, and
+// this arm is the case that must read large.
+const PREPEND_NOKEY = params.get('nokey') === '1'
+const pkey = (ids, i) => (PREPEND_NOKEY ? String(i) : ids[i])
+
+function PrependHost({ render }) {
+  const [state, setState] = React.useState(() => {
+    const data = makePrependBatch(SIZE)
+    return { data, ids: data.map((_, i) => `o${i}`) }
+  })
+  React.useEffect(() => {
+    let loaded = 0
+    window.__prepend = (n) => {
+      const b = loaded++
+      setState((prev) => {
+        const add = makePrependBatch(n)
+        return {
+          data: [...add, ...prev.data],
+          ids: [...add.map((_, i) => `p${b}-${i}`), ...prev.ids],
+        }
+      })
+    }
+    return () => { delete window.__prepend }
+  }, [])
+  return render(state)
+}
+
+// `data-pid` is the probe's address and always carries the STABLE id, even in
+// the ?nokey=1 control — otherwise the control would break the measurement
+// rather than the thing being measured.
+function prependRow(item, index, id, realItems) {
+  return html`
+    <div class="msg" data-pid=${id}>
+      ${realItems
+        ? renderRealItem(item, index)
+        : html`<${Message} text=${item} role=${index % 3 === 0 ? 'user' : 'assistant'} />`}
+    </div>`
+}
+
+function PrependProto({ data, ids }) {
+  usePrependMeasurement(findChatScrollEl)
+  const real = MIX === 'real' || MIX === 'wild'
+  const est = EST === 'kind' ? 190 : EST !== null ? Number(EST) : 120
+  return html`
+    <div style=${{ height: '100dvh' }}>
+      <${ProtoList}
+        measureMode=${params.get('measure') || 'sync'}
+        data=${data}
+        keyExtractor=${(_item, i) => pkey(ids, i)}
+        renderItem=${({ item, index }) => prependRow(item, index, ids[index], real)}
+        estimatedItemSize=${est}
+        getItemType=${real && params.get('type') !== '0' ? (item) => item.kind : undefined}
+        style=${{ height: '100%' }}
+      />
+    </div>`
+}
+
+function PrependLegend({ data, ids }) {
+  usePrependMeasurement(findChatScrollEl)
+  const real = MIX === 'real' || MIX === 'wild'
+  const est = EST === 'kind' ? 190 : EST !== null ? Number(EST) : undefined
+  return html`
+    <div style=${{ height: '100dvh' }}>
+      <${LegendList}
+        data=${data}
+        keyExtractor=${(_item, i) => pkey(ids, i)}
+        renderItem=${({ item, index }) => prependRow(item, index, ids[index], real)}
+        estimatedItemSize=${est}
+        getItemType=${real && params.get('type') !== '0' ? (item) => item.kind : undefined}
+        initialScrollAtEnd=${true}
+        maintainScrollAtEnd=${true}
+        maintainVisibleContentPosition=${true}
+        recycleItems=${true}
+        style=${{ height: '100%' }}
+      />
+    </div>`
+}
+
+function PrependTanstack({ data, ids }) {
+  const parentRef = React.useRef(null)
+  const real = MIX === 'real' || MIX === 'wild'
+  const estimate = React.useCallback((i) => {
+    if (EST === 'kind' && real) {
+      const it = data[i]
+      if (it.kind === 'tools') return 40 + 28 * it.calls.length
+      if (it.kind === 'user') return 120
+      return 260
+    }
+    if (EST !== null) return Number(EST)
+    return real ? 60 : 120
+  }, [data, real])
+  const virtualizer = useVirtualizer({
+    count: data.length,
+    getScrollElement: () => parentRef.current,
+    estimateSize: estimate,
+    // Without this TanStack keys by index too and the prepend renumbers
+    // everything — the same trap the harness's other arms fall into.
+    getItemKey: (i) => pkey(ids, i),
+    overscan: OVERSCAN,
+    directDomUpdates: DDU,
+    anchorTo: 'end',
+    useAnimationFrameWithResizeObserver: params.get('rafRO') === '1',
+  })
+  usePrependMeasurement(() => parentRef.current)
+  return html`
+    <div class="transcript" ref=${parentRef} style=${{ height: '100dvh' }}>
+      <div style=${{ height: virtualizer.getTotalSize(), width: '100%', position: 'relative' }}>
+        ${virtualizer.getVirtualItems().map((vi) => html`
+          <div
+            key=${vi.key}
+            data-index=${vi.index}
+            data-pid=${ids[vi.index]}
+            ref=${virtualizer.measureElement}
+            class="msg"
+            style=${{ position: 'absolute', top: 0, left: 0, width: '100%', transform: `translateY(${vi.start}px)` }}
+          >
+            ${real
+              ? renderRealItem(data[vi.index], vi.index)
+              : html`<${Message} text=${data[vi.index]} role=${vi.index % 3 === 0 ? 'user' : 'assistant'} />`}
+          </div>
+        `)}
+      </div>
+    </div>`
+}
+
 let appTree
-if (SCENARIO === 'rest' || SCENARIO === 'reflow' || SCENARIO === 'scrollup') {
+if (SCENARIO === 'prepend') {
+  // Explicit dispatch, no fallthrough: an unsupported arm must say so rather
+  // than silently render a different library under this one's label.
+  const arm = { proto: PrependProto, legend: PrependLegend, tanstack: PrependTanstack }[LIST]
+  appTree = arm
+    ? html`<${PrependHost} render=${(s) => html`<${arm} data=${s.data} ids=${s.ids} />`} />`
+    : html`<pre style=${{ padding: '24px', font: '13px ui-monospace' }}>
+scenario=prepend has no arm for list=${LIST}.
+Supported: proto, legend, tanstack.</pre>`
+} else if (SCENARIO === 'rest' || SCENARIO === 'reflow' || SCENARIO === 'scrollup') {
   const msgs = MIX === 'real' || MIX === 'wild' ? null : makeMessages(SIZE)
   const realItems = MIX === 'wild' ? makeWildItems(SIZE) : MIX === 'real' ? makeItems(SIZE) : null
   const inner = LIST === 'astryx'
