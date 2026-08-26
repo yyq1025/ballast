@@ -77,7 +77,7 @@ if (params.get('blank') === '1') {
     'color:#7fdc7f;font:11px/1.5 monospace;padding:8px 10px;border-radius:6px;' +
     'pointer-events:none;max-width:92vw;white-space:pre-wrap'
   document.body.appendChild(o)
-  let frames = 0, blank = 0, maxStrip = 0, run = 0, maxRun = 0, worstAt = 0
+  let frames = 0, blank = 0, maxStrip = 0, run = 0, maxRun = 0, worstAt = 0, worstSnap = '—'
   const find = () => {
     let best = null
     for (const d of document.querySelectorAll('div')) {
@@ -122,7 +122,22 @@ if (params.get('blank') === '1') {
         maxRun = Math.max(maxRun, run)
         let strip = 0
         while (strip < 1200 && !hit(r.top + 2 + strip)) strip += 6
-        if (strip > maxStrip) { maxStrip = strip; worstAt = Math.round(sc.scrollTop) }
+        if (strip > maxStrip) {
+          maxStrip = strip
+          worstAt = Math.round(sc.scrollTop)
+          // Snapshot the layout AT the worst blank. Three mechanisms can
+          // produce it and they are told apart here, not by argument: an
+          // EMPTY window (both spacers 0, no rows) is a window computed out
+          // of range; a large TOP spacer with rows present is the block
+          // pushed below the fold; rows present with sane spacers is render
+          // lag, and nothing to do with the gesture correction.
+          const kids = sc.children
+          const px = (n) => (n && n.style ? Math.round(parseFloat(n.style.height) || 0) : -1)
+          worstSnap =
+            `rows ${sc.querySelectorAll('.msg, .cvrow').length}` +
+            ` spacers ${px(kids[0])}/${px(kids[kids.length - 1])}` +
+            ` sh ${sc.scrollHeight} ch ${Math.round(r.height)}`
+        }
       } else run = 0
       const cl = window.__bt.filter((e) => e.t === 'CLAMP')
       o.textContent =
@@ -130,6 +145,7 @@ if (params.get('blank') === '1') {
         `blank frames  ${blank}/${frames} (${((100 * blank) / Math.max(1, frames)).toFixed(1)}%)\n` +
         `longest run   ${maxRun} frames  (~${Math.round((maxRun / 60) * 1000)}ms)\n` +
         `worst strip   ${maxStrip}px  at scrollTop ${worstAt}\n` +
+        `  at that frame ${worstSnap}\n` +
         `spacer clamp  ${cl.length}x  max lost ${cl.reduce((a, c) => Math.max(a, c.lost), 0)}px\n` +
         `(tap-hold to read; reload to reset)`
     }
