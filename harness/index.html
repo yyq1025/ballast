@@ -75,6 +75,84 @@ const params = new URLSearchParams(location.search)
 // long, and whether the top spacer hit its clamp (the engine cannot absorb a
 // gesture correction at the very top — there is no spacer left). Works in any
 // scenario. `window.__bt` opts the engine's clamp counter in.
+// ?release=1 — on-device readout for "letting go moves the page". The bar is
+// Rocksteady's, measured on a live claude.ai session: scrollTop may travel as
+// far as it likes at release (1109px there), the PICTURE may not (1px there).
+// Anchors the topmost row intersecting the viewport at touchend and reports how
+// far it moved once everything settles, keeping the last few gestures so a
+// rare one is not lost to the next.
+if (params.get('release') === '1') {
+  const o = document.createElement('div')
+  o.style.cssText =
+    'position:fixed;left:4px;top:4px;z-index:99999;background:rgba(0,0,0,.88);' +
+    'color:#7fdc7f;font:11px/1.5 monospace;padding:8px 10px;border-radius:6px;' +
+    'pointer-events:none;max-width:92vw;white-space:pre-wrap'
+  document.body.appendChild(o)
+  const log = []
+  const paint = (extra) =>
+    (o.innerHTML =
+      'RELEASE PROBE  (drag, then let go)\n' +
+      'bar: scrollTop may move, the picture may not (<=4px)\n' +
+      (log.length ? log.join('\n') : '  no gesture yet') +
+      (extra ? `\n${extra}` : ''))
+  paint()
+  const find = () => {
+    let best = null
+    for (const d of document.querySelectorAll('div')) {
+      if (d.scrollHeight > d.clientHeight + 10) {
+        const oy = getComputedStyle(d).overflowY
+        if ((oy === 'auto' || oy === 'scroll') && (!best || d.scrollHeight > best.scrollHeight)) best = d
+      }
+    }
+    return best
+  }
+  const rowsIn = (sc) => {
+    const box = sc.getBoundingClientRect()
+    let best = null, bt = -Infinity
+    for (const e of sc.querySelectorAll('[data-pkey]')) {
+      const r = e.getBoundingClientRect()
+      const top = r.top - box.top
+      if (r.bottom - box.top <= 0 || top >= sc.clientHeight) continue
+      if (top > bt) { bt = top; best = { key: e.getAttribute('data-pkey'), top: Math.round(top) } }
+    }
+    return best
+  }
+  const topOf = (sc, key) => {
+    const e = sc.querySelector(`[data-pkey="${key}"]`)
+    return e ? Math.round(e.getBoundingClientRect().top - sc.getBoundingClientRect().top) : null
+  }
+  let armed = false
+  addEventListener('touchstart', () => { armed = true }, { passive: true, capture: true })
+  addEventListener(
+    'touchend',
+    (e) => {
+      if (!armed || (e.touches && e.touches.length)) return
+      armed = false
+      const sc = find()
+      if (!sc) return
+      const a = rowsIn(sc)
+      if (!a) { paint('  (no row under the viewport at release)'); return }
+      const st0 = sc.scrollTop
+      let n = 0
+      const tick = () => {
+        if (++n < 100) { requestAnimationFrame(tick); return }
+        const now = topOf(sc, a.key)
+        const shift = now === null ? null : now - a.top
+        log.unshift(
+          `  ${a.key.padStart(5)}  scrollTop ${String(Math.round(sc.scrollTop - st0)).padStart(7)}px  ` +
+            (shift === null
+              ? '<span class="bad">row GONE</span>'
+              : `picture <span class="${Math.abs(shift) > 4 ? 'bad' : 'ok'}">${shift}px</span>`),
+        )
+        log.length = Math.min(log.length, 6)
+        paint()
+      }
+      requestAnimationFrame(tick)
+    },
+    { passive: true, capture: true },
+  )
+}
+
 if (params.get('blank') === '1') {
   window.__bt = []
   const o = document.createElement('div')
