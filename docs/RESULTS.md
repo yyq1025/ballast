@@ -268,3 +268,49 @@ right form for the defect to appear.
 
 The competitive settle-jump figure that had reached the astryx PR description
 was collected in the same under-configured arm and has been removed from it.
+
+### Upstream provenance (2026-08-25): the iOS gate is old, and Anthropic fixed this class in it before replacing it
+
+Read from a clean checkout of TanStack/virtual at `e9874f03` (the tree published
+as 3.17.3, which is what the harness arm loads), so every line below is
+reproducible with `git log -S` in that repo.
+
+TanStack does **not** lack gesture gating. `virtual-core` carries
+`_iosTouching`, `_iosJustTouchEnded`, `_iosDeferredAdjustment` and
+`_flushIosDeferredIfReady`: while `isIOSWebKit() && (isScrolling || _iosTouching
+|| _iosJustTouchEnded)`, `applyScrollAdjustment` accumulates the delta instead
+of writing it, and flushes once when settled. It also declines to flush inside
+the rubber-band zone and drops a negative deferred delta at the end clamp
+(#1233). This is careful work and any comparison that implies otherwise is
+wrong.
+
+Provenance of that machinery, and of the fixes around it:
+
+| date | author | change |
+|---|---|---|
+| 2026-05-20 | Tanner Linsley | #1168 — virtual-core rewrite, **iOS Safari handling** introduced here |
+| 2026-06-26 | Marius Schulz `<mds@anthropic.com>` | #1209 — sync `scrollOffset` in `applyScrollAdjustment` so end-anchored resize survives the browser clamp |
+| 2026-06-30 | Marius Schulz `<mds@anthropic.com>` | #1212 — **"viewport drifts when above-viewport rows resize over multiple frames"** |
+| 2026-07-12 | Bas Nijholt | #1220 — reset iOS gesture/deferral state on cleanup |
+
+Two things follow. First, the iOS gate predates Anthropic's contributions, so
+their engineers were working on a virtualizer that **already had** gesture
+deferral. Second, #1212 is the same defect class as the third one in § 7 above
+("content crawled under the finger": rows mounting above the viewport land their
+real-minus-estimate delta in the geometry) — they fixed an instance of it,
+upstream, in June. Anthropic then shipped a self-built virtualizer (Rocksteady:
+spacer, document flow, `anchorKey` identity anchoring, `sizerExcess`) alongside
+TanStack in the same bundle.
+
+A team that fixed the bug upstream and replaced the library anyway is evidence
+that the residue is not a bug. It is the one-lever property: with rows placed by
+transform, every correction must be paid in scrollTop. `_iosDeferredAdjustment`
+changes *when* it is paid, `directDomUpdates` changes *how fast*, #1209/#1212
+change *how accurately* — none of them make the payment invisible. A leading
+spacer is a second lever, and two levers can cancel; that requires owning the
+layout, which a headless contract declines to do by definition.
+
+One coverage note: the gate is behind `isIOSWebKit()` (UA regex plus the
+iPadOS `MacIntel && maxTouchPoints > 0` case), so **Android touch does not take
+the deferral path at all**. The gate here is on touch events themselves, with no
+UA test — see § 7.
