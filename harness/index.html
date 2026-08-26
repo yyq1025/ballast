@@ -4,6 +4,16 @@
 <title>tanstack-virtual streaming tail flicker repro</title>
 <style>
   * { box-sizing: border-box; }
+  /* iOS Safari chains an inner scroller's overscroll to its ancestors, so at
+     the end of the transcript a swipe moves the PAGE — rubber-band plus the
+     URL bar — instead of the list. That contaminates every device reading
+     taken here, since the probes measure the inner scroller only.
+     Two independent guards, because they fail in different places: locking the
+     shell to the viewport leaves nothing to chain TO (this is what claude.ai
+     does — its html, body and pane scroller are all exactly viewport height
+     and none of them can scroll, which is why it never sets the property), and
+     `contain` stops the propagation itself. */
+  html, body { height: 100%; overflow: hidden; overscroll-behavior: none; }
   body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #141414; color: #ddd; }
   body.light { background: #fff; color: #1c1c1c; }
   body.light .msg { border-bottom-color: #eee; }
@@ -12,7 +22,7 @@
   .bench-chat { flex: 1; min-height: 0; }
   body.cv .cvrow { content-visibility: auto; contain-intrinsic-size: auto 80px; }
   #root { display: flex; flex-direction: column; height: 100dvh; }
-  .transcript { flex: 1; overflow-y: auto; contain: strict; }
+  .transcript { flex: 1; overflow-y: auto; contain: strict; overscroll-behavior: contain; }
   .msg { padding: 10px 18px; border-bottom: 1px solid #232323; font-size: 14px; line-height: 1.5; }
   .msg .role { color: #7a7a7a; font-size: 11px; margin-bottom: 4px; text-transform: uppercase; }
   .msg pre { background: #1e1e2a; padding: 10px; border-radius: 6px; overflow-x: auto; font-size: 12px; }
