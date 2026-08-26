@@ -232,15 +232,39 @@ and it was not. Two problems, both mine:
    for exactly this flicker ([TanStack/virtual#1227](https://github.com/TanStack/virtual/issues/1227)):
    an above-viewport re-measure writes `scrollTop` synchronously in the RO
    callback while the matching transform goes through React's async render, so
-   the two land in different paints. With `?ddu=1` on the heavy corpus the
-   jitter goes to **zero** (0 frames, 0px, full commanded travel), and layout
-   stays correct (14 rows mounted, no gaps or overlaps).
+   the two land in different paints. Enabling it (`?ddu=1`) does not remove the
+   jitter but pushes it back and shrinks it — over 25000px of slow up-scroll on
+   the heavy corpus, first jitter moves from 3988px to 11390px travelled, the
+   amplitude from 328px to 58px, and the count from 65 frames to 9. Layout
+   stays correct either way (14 rows mounted, no gaps or overlaps).
 
-So the up-scroll jumps measured against this arm are a **default-configuration**
-artifact, not an inherent limit of that library, and any comparison must run it
-at `?ddu=1`. Note the corpus dependence too: the same version measures 10px max
-on the standard `mix=real` profile (§ above) and 328px on `size=3000&mix=code`,
-because bigger rows carry bigger estimate errors.
+So the up-scroll jumps measured against this arm were exaggerated by a
+**default configuration**, and any comparison must run it at `?ddu=1` — but the
+phenomenon does not disappear there. Note the corpus dependence too: the same
+version measures 10px max on the standard `mix=real` profile (§ above) and
+328px on `size=3000&mix=code`, because bigger rows carry bigger estimate errors.
+
+Re-run at that length, the arms compare like this — same corpus, same engine
+(Gecko), same 10px/frame command, 25000px of travel:
+
+| arm | jitter frames | max | first jitter | travelled |
+|---|---|---|---|---|
+| TanStack, `overscan=12` + `ddu=1` (its best) | 9 | 58px | after 11390px | 15870px |
+| proto, driven as a touch gesture | **0** | **0px** | — | **25000px** |
+
+The input forms are not identical and cannot be: proto's write-gate is a touch
+path, and TanStack's own touch deferral is iOS-gated, so on a desktop engine it
+sees plain scroll writes either way. Read the row as "each arm on the input it
+handles", not as one input through two engines.
+
+**Methodology note — probe length is a correctness parameter.** The first
+`?ddu=1` run measured a clean zero, and it was wrong: at 500 frames × 10px it
+covered 5000px and stopped inside the window before the first jump, which a
+hand test reached at ~21000px. A short probe does not report "no defect", it
+reports "no defect yet". Same failure class as the corpus note above (a light
+corpus converges the estimator too fast to expose the correction path) and as
+the touch blind spot in § 7 — the axis was never driven far enough or in the
+right form for the defect to appear.
 
 The competitive settle-jump figure that had reached the astryx PR description
 was collected in the same under-configured arm and has been removed from it.
