@@ -365,13 +365,9 @@ Gecko, `mix=wild`, size 1200, 3 batches × 300 rows, anchored mid-history:
 | tanstack `overscan=12 ddu=1` | held | 0px | 0px |
 | legend | held | 0px | 0px |
 
-**This axis does not differentiate, and that is the finding.** Prepend is a
-solved problem in all three — which is consistent with TanStack shipping a
-dedicated fix for it ([#1176](https://github.com/TanStack/virtual/pull/1176),
-eager `scrollOffset` adjust on prepend) and LegendList shipping
-`maintainVisibleContentPosition`. It belongs in this document as *covered*, not
-as an advantage, and nothing about it should reach a PR description as a
-competitive claim. The differentiator remains touch (§ 7).
+Anchored mid-history, this axis does not differentiate. **It does at the top
+boundary, and not in proto's favour — see below.** Nothing here should reach a
+PR description as a competitive claim; the differentiator remains touch (§ 7).
 
 One asymmetry worth naming rather than averaging away: the arms do not pay
 equally sized corrections. TanStack's growth is exactly 300 × 60px — the
@@ -379,6 +375,44 @@ estimate — because it never measures rows that are far above the window, so it
 defers that work to the scroll-up path (§ 1) instead of paying it at insert
 time. proto and legend absorb 81–106k px at insert. Each arm pays whatever
 correction it creates, exactly; they simply create different ones.
+
+### The top boundary: an open defect in proto, found by hand
+
+The section above was written from a clean matrix and was wrong about coverage.
+The scripted axis lands at the bottom, climbs `?uppx=` into history, and anchors
+there — **it never goes to scrollTop 0.** Loading a page by hand at the very top
+in the browser slips the view by about one row, permanently:
+
+| condition (Chrome, `mix=wild`, 300 rows) | result |
+|---|---|
+| by hand at `scrollTop = 0`, 12 runs | **7 slipped**, 5 clean |
+| when it slips | **1184–1252px**, always landing on `p0-299` instead of `o0` |
+| does it recover | no — still there 5s later, scrollTop parked |
+| same corpus at 30% down | 0 slip |
+
+Then, with `?at=top` added to the scripted axis (2 batches, 2 runs each):
+
+| arm | `?at=top` |
+|---|---|
+| proto | **anchor LOST both runs** |
+| tanstack `overscan=12 ddu=1` | clean both runs |
+| legend | **1070px shift** both runs (anchor kept) |
+
+So the boundary is where TanStack's maturity shows, which is consistent with it
+carrying a dedicated prepend fix
+([#1176](https://github.com/TanStack/virtual/pull/1176)); LegendList has a
+milder version of the same slip; proto's is the worst of the three. Open, not
+fixed, not worked around.
+
+**A hypothesis this falsified.** The first reading pointed at the estimator:
+`?type=0` (no per-type average refinement) read a clean zero, so per-type
+refinement looked like the driver. It is not — an estimate sweep
+(`?est=200/400/800/1600/kind`) came back non-monotonic, with the *same* config
+slipping on one run and clean on the next. At a 7-in-12 rate a single clean run
+is worth nothing, and that first `?type=0` zero was luck. Intermittency has to
+be measured as a rate before any single run is read as evidence — the same
+mistake as a probe that stops before the defect (§ above) wearing different
+clothes.
 
 **Not covered:** prepend arriving *during* a touch gesture, where the write-gate
 and `gestureAdj` would have to compose with the batch. That combination has

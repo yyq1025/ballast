@@ -174,6 +174,10 @@ const PREPEND_BATCHES = Number(params.get('batches') || 3)
 const PREPEND_UPPX = Number(params.get('uppx') || 4000)
 const PREPEND_WATCH = Number(params.get('watch') || 90)
 const PREPEND_AT_END = params.get('at') === 'end'
+// ?at=top — fire from scrollTop 0. Found by hand: the scripted axis anchors
+// mid-history and never went near the boundary, so it read a clean zero on a
+// case that slips 7 runs in 12.
+const PREPEND_AT_TOP = params.get('at') === 'top'
 // ?auto=0 — skip the scripted probe and load pages by hand instead. The
 // scripted run is over in seconds, which is the wrong shape for looking at it.
 const PREPEND_AUTO = params.get('auto') !== '0'
@@ -1337,6 +1341,9 @@ function usePrependMeasurement(findScrollEl) {
       // the button press.
       const el = document.getElementById('hud')
       const btn = document.createElement('button')
+      // Stable handle: the label alternates with the quiet gate, so anything
+      // selecting on the text races it.
+      btn.id = 'prepend-btn'
       btn.textContent = `load ${PREPEND_N} older`
       btn.style.cssText =
         'position:fixed;left:12px;bottom:12px;z-index:9;padding:10px 14px;' +
@@ -1463,12 +1470,16 @@ function usePrependMeasurement(findScrollEl) {
       if (performance.now() - startT >= MAX_MS && startT) { finish(); return }
 
       if (phase === 'land') {
-        const pe = pinErr(el)
-        if (pe > 4) { el.scrollTop = el.scrollHeight; stable = 0 } else stable++
+        if (PREPEND_AT_TOP) {
+          if (el.scrollTop > 0) { el.scrollTop = 0; stable = 0 } else stable++
+        } else {
+          const pe = pinErr(el)
+          if (pe > 4) { el.scrollTop = el.scrollHeight; stable = 0 } else stable++
+        }
         if (stable >= 30) {
           startT = performance.now()
           prevSh = el.scrollHeight
-          phase = PREPEND_AT_END || PREPEND_UPPX <= 0 ? 'quiet' : 'up'
+          phase = PREPEND_AT_END || PREPEND_AT_TOP || PREPEND_UPPX <= 0 ? 'quiet' : 'up'
         }
       } else if (phase === 'up') {
         el.scrollTop = Math.max(0, el.scrollTop - STEP)
@@ -1514,7 +1525,7 @@ function summarizePrepend() {
     config: {
       list: LIST, mix: MIX, size: SIZE, est: EST || 'default',
       rows: PREPEND_N, batches: PREPEND_BATCHES,
-      at: PREPEND_AT_END ? 'end' : `up${PREPEND_UPPX}`,
+      at: PREPEND_AT_END ? 'end' : PREPEND_AT_TOP ? 'top' : `up${PREPEND_UPPX}`,
       watch: PREPEND_WATCH,
     },
     batchesDone: b.length,
@@ -2159,9 +2170,13 @@ function PrependHost({ render }) {
 // `data-pid` is the probe's address and always carries the STABLE id, even in
 // the ?nokey=1 control — otherwise the control would break the measurement
 // rather than the thing being measured.
+// `data-pidx` is the row's CURRENT index. With it the slip after a batch is
+// countable in rows: an anchor that sat at index k is at k+N afterwards, so
+// whatever index is at the viewport top tells you how far the view drifted.
+// Pixel deltas cannot say this once the anchor row has left the window.
 function prependRow(item, index, id, realItems) {
   return html`
-    <div class="msg" data-pid=${id}>
+    <div class="msg" data-pid=${id} data-pidx=${index}>
       ${realItems
         ? renderRealItem(item, index)
         : html`<${Message} text=${item} role=${index % 3 === 0 ? 'user' : 'assistant'} />`}
