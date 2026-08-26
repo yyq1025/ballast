@@ -627,3 +627,58 @@ against touchend would settle it.
 So the payable-range cap is a starting point, not a dead end: reopening the
 absorb-from-paint direction — which is probably where the real fix lives — should
 start from it rather than from scratch.
+
+## 10. What the probes got wrong, and why it was always the same thing
+
+Across 2026-08-25 the instruments were wrong five times. Every one of them read
+plausibly on a desktop engine, and four of the five were caught by hand-testing
+on a phone rather than by anything in this suite. They are collected here
+because the pattern is more portable than any of the fixes.
+
+| # | The probe said | It was actually measuring |
+|---|---|---|
+| 1 | scroll-up axis: `blankPct` up to 100% for every arm, always | `#hud` — `position: fixed`, no `pointer-events: none`, and the probe samples down the middle of the scroller, which the wide read-out overlaps |
+| 2 | device blank probe: 99.9% blank frames | an 8px spacer/row seam at the top edge, counted as a whole blank frame |
+| 3 | prepend axis: anchor `LOST` | anchor never *picked* — one sample point at the viewport centre landed on a spacer, and "could not pick" was reported as "the view dropped it" |
+| 4 | prepend axis: 88–93k px `unpaid` | growth BELOW the viewport (a tail append, or rows still measuring under the fold) against a metric that assumes all growth is above it |
+| 5 | release probe: `picture 720px` after a flick | the fling itself — a fixed frame count measures whatever momentum is still doing, and 720px of picture movement is exactly what scrolling up 720px looks like |
+
+Three earlier failures in the same family, from the same day, differ only in
+which axis was left unexercised: a 5000px probe that stopped before a defect
+starting at 11390px; a corpus light enough that the estimator converged before
+the correction path ran; and touch input, which had never been driven at all
+until a phone was picked up.
+
+### The pattern
+
+**A synthetic desktop harness is missing exactly the things that make a probe
+wrong, so a wrong probe looks right there.** Momentum (5), real layout and real
+row heights (2, 3, 4), real overlays (1) — each absent on the bench, each
+decisive on the device. This is not a statement about phones: it is that the
+environment where an instrument is validated has to contain the phenomena the
+instrument is meant to distinguish, and a bench is chosen precisely for not
+containing them.
+
+Three working rules follow, and each of them was earned by breaking it first:
+
+- **A zero is a claim about the probe before it is a claim about the code.**
+  Every axis here now ships a falsification arm — `?nokey=1` reads 93345px of
+  unpaid debt where the real arm reads 0 — because an axis that reads zero
+  everywhere is not measuring anything, and there is no way to tell those apart
+  from the zero itself.
+- **Length, corpus and input form are correctness parameters, not settings.**
+  Each was tuned for speed at some point, and each silently moved the answer.
+- **On an intermittent defect, one clean run is worth nothing.** Rates, not
+  runs: 7/12 before a fix and 0/12 after says something; one run of each says
+  nothing, and a hypothesis was accepted and later falsified on exactly that
+  basis (`?type=0` looked like the cause of the over-estimate gap because a
+  single run came back clean at a 58% failure rate).
+
+### And one attribution error worth keeping
+
+A regression was blamed on the absorption cap for three iterations. A control
+run — cap removed, everything else identical — produced byte-identical numbers,
+which meant the cap had never fired and the regression belonged to a different
+change made in the same sitting. Two variants had been designed and measured
+against a cause that was not there. **Whenever a change and a regression appear
+together, the control is the change removed, not the change explained.**
