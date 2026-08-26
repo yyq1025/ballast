@@ -20,7 +20,13 @@
   .msg h3 { margin: 8px 0 4px; }
   .msg ul { margin: 4px 0; }
   #hud { position: fixed; top: 8px; right: 20px; background: #000d; border: 1px solid #333;
-         padding: 10px 12px; font: 11px/1.5 ui-monospace, monospace; z-index: 9; white-space: pre; border-radius: 6px; }
+         padding: 10px 12px; font: 11px/1.5 ui-monospace, monospace; z-index: 9; white-space: pre; border-radius: 6px;
+         /* elementFromPoint stops at this overlay otherwise, and every blank
+            probe samples through the middle of the scroller — the wide scrollup
+            readout reaches past that line, so the top sample hit the HUD on
+            every frame of every arm. That is what this axis was calling a
+            blank viewport. */
+         pointer-events: none; }
   #hud .bad { color: #ff6b6b; }
   #hud .ok { color: #69db7c; }
 </style>
@@ -1332,12 +1338,19 @@ function useScrollupMeasurement(findScrollEl) {
             const cr = el.getBoundingClientRect()
             let miss = 0
             const hit = (y) => { const n = document.elementFromPoint(cr.left + cr.width / 2, y); return !!(n && n.closest && n.closest('.msg, .cvrow')) }
+            // Sample the middle 90% and require TWO misses. The old form put
+            // probe 0 at cr.top + 8, which lands in the spacer/row seam: it
+            // read 899 misses out of 899 frames on the proto arm while the
+            // other four probes never missed once, so every blankPct this axis
+            // has ever reported for an arm whose first row starts below the top
+            // edge was that seam, not an uncovered viewport. A band larger than
+            // 5% of the viewport still registers.
             for (let k = 0; k < 5; k++) {
-              const y = cr.top + 8 + (cr.height - 16) * k / 4
+              const y = cr.top + cr.height * (0.05 + 0.225 * k)
               if (!hit(y)) { miss++; s.probeMiss = s.probeMiss || [0,0,0,0,0]; s.probeMiss[k]++ }
             }
             s.fillFrames = (s.fillFrames || 0) + 1
-            if (miss > 0) {
+            if (miss >= 2) {
               s.blankFrames = (s.blankFrames || 0) + 1; s.blankMaxProbes = Math.max(s.blankMaxProbes || 0, miss)
               // size of the blank strip at the top edge (rows enter from the top when scrolling up)
               let px = 0

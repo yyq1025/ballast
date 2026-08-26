@@ -400,6 +400,39 @@ export function Ballast(props) {
     }
   }
 
+  // The same reference frame, MEASURED instead of derived.
+  //
+  // anchorAt computes viewportOffset as `offsets[idx] - y`, which is exactly
+  // the anchored row's painted top — but only while painted == model +
+  // gestureAdj holds. The top-spacer clamp breaks that: at the very top of the
+  // list there is nothing above to absorb a negative adjustment into, so the
+  // spacer stops at 0 while gestureAdj keeps its full value, and every derived
+  // position is wrong by the difference. Reading a rendered row's real rect
+  // skips the broken map: viewportOffset is DEFINED as where the row actually
+  // is, so the restore reproduces the current picture by construction, and
+  // scrollTop is free to move as far as it needs to.
+  //
+  // Same row anchorAt would pick — the one covering the viewport top — so this
+  // is a drop-in, not a change of semantics. Returns null when no row is
+  // rendered (empty list, or a window that has not committed yet), and the
+  // caller falls back to the derived form.
+  const anchorFromPaint = (el) => {
+    const g = geo.current
+    const box = el.getBoundingClientRect()
+    const h = el.clientHeight
+    let best = null
+    for (const [key, rowEl] of rowEls.current) {
+      if (!rowEl.isConnected || !g.index.has(key)) continue
+      const r = rowEl.getBoundingClientRect()
+      const top = r.top - box.top
+      if (r.bottom - box.top <= 0 || top >= h) continue
+      if (best === null || top < best.viewportOffset) {
+        best = { kind: 'anchor', key, viewportOffset: top }
+      }
+    }
+    return best
+  }
+
   // Scroll offset at which our content starts. Zero when we own the scroller;
   // in attach mode the caller's container can put padding, a header or a
   // sticky region above us, and every offset in `geo` is relative to our first
@@ -875,21 +908,24 @@ export function Ballast(props) {
       // machinery growth as a user pushing away).
       //
       // The re-statement itself is UNCONDITIONAL, because it is also what
-      // hands the gesture adjustment back: anchorAt reads through
-      // paintOrigin, so whatever the spacer is still carrying folds into the
-      // stored viewportOffset, and zeroing the adjustment below leaves the
-      // sync one balancing scrollTop write — spacer and position move in the
-      // same task, nothing paints in between. Skipping the fold on a tap
+      // hands the gesture adjustment back: the stored viewportOffset is where
+      // the anchored row actually IS, so zeroing the adjustment below leaves
+      // the sync one balancing scrollTop write — spacer and position move in
+      // the same task, nothing paints in between. Skipping the fold on a tap
       // dropped the adjustment on the floor instead (measured: a tap right
       // after a long drag, while measurements were still landing, jumped
       // 10680px).
+      //
+      // It reads that offset from the DOM (anchorFromPaint) rather than
+      // deriving it, so a clamped spacer cannot make the two disagree. The
+      // derived form stays as the fallback for a list with nothing rendered.
       if (!converging.current) {
         const atEnd = gestureMoved.current
           ? max - el.scrollTop <= endThresholdRef.current
           : mode.current.kind === 'end'
         mode.current = atEnd
           ? { kind: 'end', distance: 0 }
-          : anchorAt(el.scrollTop)
+          : anchorFromPaint(el) ?? anchorAt(el.scrollTop)
         userAway.current = 0
         // The fold is a MACHINE repositioning: the adjustment now lives only
         // in the folded viewportOffset, and the live-anchor refresh — which

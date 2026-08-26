@@ -476,3 +476,96 @@ clothes.
 **Not covered:** prepend arriving *during* a touch gesture, where the write-gate
 and `gestureAdj` would have to compose with the batch. That combination has
 never been driven and is not claimed anywhere.
+
+## 9. 2026-08-25: releasing the finger moved the page, and a metric that was measuring the HUD
+
+Reported by hand on an iPhone: flick up to the top, and on release whatever you
+were reading changes position. The device probe (`?blank=1`) showed 69 top-spacer
+clamps in one flick, carrying up to 4571px.
+
+### The cause
+
+`paintOrigin()` — and therefore `anchorAt`, `targetFor` and `computeWindow` —
+assume **painted position == model position + gestureAdj**. At the very top
+there is nothing above to absorb a negative adjustment into, so the spacer stops
+at 0 while `gestureAdj` keeps its full value. From that moment the machinery is
+working in a coordinate system the screen does not share, and the flush restates
+the frame from the broken map: the debt lands as a visible jump.
+
+One fix was tried and falsified before this one — returning the unrealizable
+excess to `gestureAdj`. It defines the adjustment in terms of `w.start` while
+`computeWindow` derives `w.start` from the adjustment, and the loop that closes
+holds a 436px gap open under the finger: blank frames went 0% → 41.3% while the
+clamp count fell 13 → 2. Reverted.
+
+### What Rocksteady does (measured, not read)
+
+claude.ai's own virtualizer was instrumented directly on a live session — the
+scroller's `scrollTop` setter wrapped, real touch events dispatched, one row
+followed by identity:
+
+| Rocksteady, mid-history | |
+|---|---|
+| scrollTop writes while the touch is held | **0** |
+| writes at release | **1**, 16167 → 15058 (**−1109px**) |
+| the followed row's painted top | −996 → **−995** (**1px**) |
+
+The gate premise is the same as ours. The difference is the release: scrollTop
+travels 1109px and the picture does not move, which is only possible if the
+frame is restated from **what is painted** rather than from the model. Its
+scroller also carries `overflow-anchor: none` and `contain: strict` — we already
+set the former (`src/index.mjs`, on mount, restored on unmount).
+
+Caveat: the same experiment at the top was inconclusive for them. Slamming
+scrollTop to 0 in 20 frames with synthetic touch loses the followed row, and
+their release wrote 0 → 9422. Synthetic touch has no momentum; that setup cannot
+judge a boundary, theirs or ours.
+
+### The fix: anchor from paint
+
+`anchorAt` computes `viewportOffset` as `offsets[idx] - y`, which *is* the row's
+painted top — while the map holds. `anchorFromPaint` reads the same quantity
+from a rendered row's rect instead, so a clamped spacer cannot make the two
+disagree. Same row, same semantics, one less assumption; the derived form stays
+as the fallback when nothing is rendered.
+
+| proto, synthetic touch drag, release | scrollTop moved | painted shift |
+|---|---|---|
+| ending at the top, before | 182px | **−182px** |
+| ending at the top, after | 0px | **0px** |
+| mid-history (start 300000), after | +435px | **1px** |
+| mid-history (start 150000), after | −427px | **0px** |
+
+The mid-history rows are the Rocksteady signature: the correction is paid in
+full and is invisible. Regression: prepend axis 0px on every position with the
+`?nokey=1` control still red, scroll-up painted jump 0%, fling blank 0%.
+
+### The blank metric on § 1 was measuring the HUD
+
+While regression-testing, the scroll-up axis reported `blankPct: 100` with
+`probeMiss 899/0/0/0/0` — every frame missing at the top probe and never at the
+other four, identically before and after the change. `#hud` is `position: fixed`
+at `top: 8px; right: 20px` **without `pointer-events: none`**, and the probe
+samples down the middle of the scroller; the wide scroll-up readout reaches past
+that line, so `elementFromPoint` returned the overlay. Every blank figure this
+axis has produced was that overlay, for every arm.
+
+Fixed (`pointer-events: none`, plus the same middle-90%/two-miss rule as the
+device probe). Re-measured, `mix=wild`, size 1200:
+
+| arm | step=10 | step=200 | step=1000 |
+|---|---|---|---|
+| proto | 0% | 0% | **0%** |
+| tanstack `overscan=12 ddu=1` | 0% | 0% | **0%** |
+| legend | 0% | 0% | **96%** |
+| virtuoso | 0% | 19.1% | 87.3% |
+| virtuoso `ivb=300` | 0% | 17% | **99.8%** |
+
+Two retractions follow. Any earlier blank percentage from this axis is void.
+And `increaseViewportBy=300` does **not** fix virtuoso's fast-scroll blanking —
+it is slightly worse with it at both speeds, so the previously recorded
+"ivb=300 fixes it" is wrong.
+
+Ours holding 0% at 1000px/frame on a desktop engine also says the iPhone blank
+is not this: it is WebKit momentum against rows an order of magnitude heavier
+than this corpus, which no desktop repro here has reproduced.
