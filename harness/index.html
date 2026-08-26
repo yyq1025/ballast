@@ -92,7 +92,7 @@ if (params.get('release') === '1') {
   const paint = (extra) =>
     (o.innerHTML =
       'RELEASE PROBE  (drag, then let go)\n' +
-      'bar: scrollTop may move, the picture may not (<=4px)\n' +
+      'bar: unexplained = picture shift the SCROLL does not account for (<=4px)\n' +
       (log.length ? log.join('\n') : '  no gesture yet') +
       (extra ? `\n${extra}` : ''))
   paint()
@@ -133,17 +133,30 @@ if (params.get('release') === '1') {
       const a = rowsIn(sc)
       if (!a) { paint('  (no row under the viewport at release)'); return }
       const st0 = sc.scrollTop
-      let n = 0
+      // Momentum outlives touchend, so a fixed frame count measures the FLING,
+      // not the machinery: on a phone this read `scrollTop -720px, picture
+      // 720px` and called it a defect, when that is simply what scrolling up
+      // by 720px looks like. Wait for the scroll to actually stop, then report
+      // what the scroll does NOT explain — the picture moves opposite to
+      // scrollTop, so the two cancel and the residue is the real signal.
+      let n = 0, still = 0, last = sc.scrollTop
       const tick = () => {
-        if (++n < 100) { requestAnimationFrame(tick); return }
+        const st = sc.scrollTop
+        still = Math.abs(st - last) < 1 ? still + 1 : 0
+        last = st
+        if (still < 12 && ++n < 600) { requestAnimationFrame(tick); return }
         const now = topOf(sc, a.key)
-        const shift = now === null ? null : now - a.top
-        log.unshift(
-          `  ${a.key.padStart(5)}  scrollTop ${String(Math.round(sc.scrollTop - st0)).padStart(7)}px  ` +
-            (shift === null
-              ? '<span class="bad">row GONE</span>'
-              : `picture <span class="${Math.abs(shift) > 4 ? 'bad' : 'ok'}">${shift}px</span>`),
-        )
+        const scrolled = Math.round(sc.scrollTop - st0)
+        const red = 'color:#ff6b6b', green = 'color:#69db7c'
+        if (now === null) {
+          log.unshift(`  ${a.key.padStart(5)}  scrolled ${String(scrolled).padStart(7)}px  <span style="color:#999">row left the viewport</span>`)
+        } else {
+          const residue = now - a.top + scrolled
+          log.unshift(
+            `  ${a.key.padStart(5)}  scrolled ${String(scrolled).padStart(7)}px  ` +
+              `unexplained <span style="${Math.abs(residue) > 4 ? red : green}">${residue}px</span>`,
+          )
+        }
         log.length = Math.min(log.length, 6)
         paint()
       }
