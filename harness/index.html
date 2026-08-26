@@ -146,7 +146,7 @@ if (params.get('blank') === '1') {
         `longest run   ${maxRun} frames  (~${Math.round((maxRun / 60) * 1000)}ms)\n` +
         `worst strip   ${maxStrip}px  at scrollTop ${worstAt}\n` +
         `  at that frame ${worstSnap}\n` +
-        `spacer clamp  ${cl.length}x  max lost ${cl.reduce((a, c) => Math.max(a, c.lost), 0)}px\n` +
+        `spacer clamp  ${cl.length}x  max ${cl.reduce((a, c) => Math.max(a, c.lost), 0)}px returned to adj\n` +
         `(tap-hold to read; reload to reset)`
     }
     requestAnimationFrame(tick)

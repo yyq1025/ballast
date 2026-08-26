@@ -345,13 +345,34 @@ export function Ballast(props) {
     const g = geo.current
     const empty = w.end < w.start || g.offsets.length === 0
     // gestureAdj shifts the whole window block without touching scrollTop
-    // (0 outside a touch gesture). Clamped at the very top of the list —
-    // there is no spacer left to absorb into there.
-    const rawTop = empty ? 0 : g.offsets[w.start] + gestureAdj.current
-    if (typeof window !== 'undefined' && window.__bt && rawTop < 0) {
-      window.__bt.push({ t: 'CLAMP', lost: Math.round(-rawTop), adj: Math.round(gestureAdj.current), off: Math.round(g.offsets[w.start]), start: w.start })
+    // (0 outside a touch gesture). At the very top of the list there is no
+    // spacer left to absorb into, and the excess is UNREALIZABLE: nothing can
+    // paint above the top of the scroller.
+    //
+    // Give it back to gestureAdj rather than only to the spacer. paintOrigin()
+    // — and therefore anchorAt, targetFor and computeWindow — assume painted
+    // position == model position + gestureAdj. A spacer that clamps while
+    // gestureAdj keeps the full value breaks exactly that invariant, so the
+    // machinery goes on working in a coordinate system the screen does not
+    // share; the debt then comes due at flush, as a visible jump of whatever
+    // the user was looking at. Measured on an iPhone: 69 clamps in one flick
+    // to the top, up to 4571px carried.
+    let rawTop = empty ? 0 : g.offsets[w.start] + gestureAdj.current
+    if (rawTop < 0) {
+      // Diagnostic counter, opt-in via window.__bt (harness ?blank=1). Remove
+      // once the on-device readings have settled.
+      if (typeof window !== 'undefined' && window.__bt) {
+        window.__bt.push({ t: 'CLAMP', lost: Math.round(-rawTop), adj: Math.round(gestureAdj.current), off: Math.round(g.offsets[w.start]), start: w.start })
+      }
+      // NOT given back to gestureAdj. Tried that — it defines adj in terms of
+      // w.start while computeWindow derives w.start from adj, and the loop
+      // that closes shows up immediately as a 436px gap held open under the
+      // finger: blank frames went 0% -> 41.3% in the desktop fling repro while
+      // the clamp count fell 13 -> 2. The coordinate inconsistency below is
+      // real, but this is not its fix.
+      rawTop = 0
     }
-    const top = empty ? 0 : Math.max(0, rawTop)
+    const top = empty ? 0 : rawTop
     const belowEnd = empty
       ? 0
       : w.end + 1 < g.offsets.length
