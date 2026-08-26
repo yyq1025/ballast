@@ -217,3 +217,30 @@ the fold (+148px).
   scrollHeight as at least clientHeight (checked across integer, fractional and
   bordered boxes), so the difference is never negative; the clamp is kept for
   invariant symmetry with `targetFor`, not as a fix.
+
+### Correction (2026-08-25): the TanStack arm was under-configured
+
+Hand-testing on a phone raised "is the comparison arm configured properly?",
+and it was not. Two problems, both mine:
+
+1. **`overscan` units.** Theirs counts ROWS, ours counts PIXELS. The arm ran
+   at `overscan: 2` (~580px on the 290px-row corpus) against proto's 1600px of
+   top overscan. Now parameterised (`?overscan=N`). It changes the FREQUENCY of
+   correction jumps (2% of frames at 2, 0.8% at 12) but not their SIZE — 328px
+   at every setting.
+2. **`directDomUpdates` was off.** This is the maintainer's documented remedy
+   for exactly this flicker ([TanStack/virtual#1227](https://github.com/TanStack/virtual/issues/1227)):
+   an above-viewport re-measure writes `scrollTop` synchronously in the RO
+   callback while the matching transform goes through React's async render, so
+   the two land in different paints. With `?ddu=1` on the heavy corpus the
+   jitter goes to **zero** (0 frames, 0px, full commanded travel), and layout
+   stays correct (14 rows mounted, no gaps or overlaps).
+
+So the up-scroll jumps measured against this arm are a **default-configuration**
+artifact, not an inherent limit of that library, and any comparison must run it
+at `?ddu=1`. Note the corpus dependence too: the same version measures 10px max
+on the standard `mix=real` profile (§ above) and 328px on `size=3000&mix=code`,
+because bigger rows carry bigger estimate errors.
+
+The competitive settle-jump figure that had reached the astryx PR description
+was collected in the same under-configured arm and has been removed from it.

@@ -151,6 +151,17 @@ const SIZE = Number(params.get('size') || 1000)
 const MIX = params.get('mix') || 'code'
 const EST = params.get('est') || null
 const STEP = Number(params.get('step') || 10)
+// ?overscan=N — rows kept mounted beyond the viewport in the TanStack arms.
+// Their unit is ROWS while ours is PIXELS, so the default 2 is far less
+// headroom than proto's 1600px top overscan (~5-6 rows on this corpus) and
+// makes measurement corrections land closer to the viewport. Parameterised so
+// the arms can be compared at matched headroom.
+const OVERSCAN = Number(params.get('overscan') || 2)
+// ?ddu=1 — TanStack's `directDomUpdates`, the maintainer's documented remedy
+// for up-scroll flicker (TanStack/virtual#1227): sizer and item transforms are
+// written straight to the DOM in the same tick as the compensation scrollTop
+// write, instead of going through React's async render a paint later.
+const DDU = params.get('ddu') === '1'
 // ?dur=ms — stream scenario runtime (default 30s). Longer runs let interaction
 // probes take many samples inside one streaming window.
 const DUR = Number(params.get('dur') || 30000)
@@ -368,7 +379,8 @@ function App() {
     count: messages.length,
     getScrollElement: () => parentRef.current,
     estimateSize: () => 120,
-    overscan: 2,
+    overscan: OVERSCAN,
+    directDomUpdates: DDU,
     anchorTo: 'end',
     followOnAppend: params.get('smooth') === '1' ? 'smooth' : true,
     useAnimationFrameWithResizeObserver: params.get('rafRO') === '1',
@@ -1315,7 +1327,8 @@ function RestTanstack({ messages, items: realItems }) {
     count,
     getScrollElement: () => parentRef.current,
     estimateSize: estimate,
-    overscan: 2,
+    overscan: OVERSCAN,
+    directDomUpdates: DDU,
     anchorTo: 'end',
     useAnimationFrameWithResizeObserver: params.get('rafRO') === '1',
   })
