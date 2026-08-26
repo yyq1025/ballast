@@ -569,3 +569,61 @@ it is slightly worse with it at both speeds, so the previously recorded
 Ours holding 0% at 1000px/frame on a desktop engine also says the iPhone blank
 is not this: it is WebKit momentum against rows an order of magnitude heavier
 than this corpus, which no desktop repro here has reproduced.
+
+### OPEN: an over-large estimate blanks the viewport for most of a drag
+
+Reproducible on desktop Chrome, `mix=wild`, synthetic touch drag at 400px/frame:
+
+| | gappy frames | max gap | recovers |
+|---|---|---|---|
+| `?est=1200&size=1200` | **2634 / 3595** | 796px of an 800px viewport | 9 frames after release |
+| `?est=1200&size=60` | 109 / 154 | 796px | 9 frames |
+| `?est=120&size=1200` (under-estimate) | **0** | 0px | — |
+
+Not confined to the top: `firstGapAtScrollTop` lands at 1053083. Not introduced
+by § 9's fix either — identical before and after it.
+
+**Cause.** The gesture-time absorb takes its held anchor from `anchorAt`, which
+reads through `paintOrigin()` — so the adjustment is derived from the same map
+the adjustment is shifting. Under a *systematic* estimate bias every pass
+corrects against a frame the previous pass already moved, and `gestureAdj`
+compounds: measured max 1.25M px at `est=1200` and 3.59M at `est=3000`, against
+an 800px viewport. The sign follows the bias — over-estimate pushes the block
+down (gap above), under-estimate pushes it up (clamped at the top, which is what
+an iPhone reads as 38–69 spacer clamps carrying 4571px).
+
+**Why it is not fixed.** Pointing the absorb at `anchorFromPaint` too — the
+obvious fix, and it does close the gap completely (2634 → 0) — trades it for a
+worse defect elsewhere. Four variants, all measured, all against the same two
+probes:
+
+| variant | over-estimate gap | fling blank | release shift |
+|---|---|---|---|
+| **shipped** (paint at flush only) | 2634/3595 | **0%** | **0px** |
+| absorb from paint | **0** | 42.7% | −688px |
+| ⌞ + cap on the payable range | 0 | **1.3%** | −501px |
+| ⌞ + cap on magnitude (8 viewports) | 0 | 42.7% | −688px |
+| ⌞ + magnitude cap with a paired write | 0 | 42.7% | −688px |
+
+Two things in that table are worth keeping. The magnitude caps never fired —
+their numbers are the no-cap control's exactly, and reading a regression into
+them was an attribution error that a control run caught. The payable-range cap
+DID fire and took the blanking down 97%, because it bounds `gestureAdj` where
+the flush can still hand it back; it is the only one of the three that engaged.
+
+**The rule underneath all of it:** painted position is
+`spacer = offsets[start] + gestureAdj`, so *any* change to the adjustment
+without a scrollTop write in the same task is itself a jump. That is why
+returning the excess (§ 9) failed, and why truncating it fails the same way. The
+payable-range cap converts one large jump into many small ones — hence 42.7% →
+1.3% but not → 0.
+
+**Unverified hypothesis for the residual −501px:** the gate stays `settling` for
+`TOUCH_SETTLE_MS` after touchend and the absorb keeps running there, so a cap
+firing inside that window would be recorded as a release shift (the probe samples
+`before` on the last touch frame). Not measured — timestamping cap firings
+against touchend would settle it.
+
+So the payable-range cap is a starting point, not a dead end: reopening the
+absorb-from-paint direction — which is probably where the real fix lives — should
+start from it rather than from scratch.
