@@ -655,20 +655,29 @@ export function Ballast(props) {
       dataRef.current.length > 0 &&
       Math.abs(el.scrollTop - target) <= CONVERGE_EPSILON_PX
     ) {
-      converging.current = false
-      // Hold the prices one pass longer than the convergence itself, and give
-      // the release a pass of its own. Whatever the averages now owe is a
-      // geometry change in its own right, and the scrollTop it implies has to
-      // be derived and written by a pass that SEES the settled numbers — not
-      // appended to the pass that just landed, whose target predates them.
+      // Reaching the target does not END a head-change convergence: the rows
+      // that arrived above are still measuring in, so the prices AND the
+      // offsets keep moving for several more passes. Give the release a pass
+      // of its own — whatever the averages now owe is a geometry change in its
+      // own right, and the scrollTop it implies has to be derived and written
+      // by a pass that SEES the settled numbers, not appended to the pass that
+      // just landed, whose target predates them. Both halves of the protection
+      // lift on THAT pass: dropping the anchor half here instead let the
+      // live-anchor refresh re-derive from a scrollTop still mid-settle and
+      // freeze the intermediate position as the new reference frame
+      // (measured: a 300-row prepend read at the top moved the reader 33-53px
+      // and kept it, every time; after, 0.1px).
       if (priceFreeze.current) {
         if (rafRelease.current !== null) cancelAnimationFrame(rafRelease.current)
         rafRelease.current = requestAnimationFrame(() => {
           rafRelease.current = null
+          converging.current = false
           priceFreeze.current = false
           geoChanged.current = true
           syncRef.current()
         })
+      } else {
+        converging.current = false
       }
     }
     // The window must cover the DESIRED position, not the stale scrollTop:
