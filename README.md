@@ -125,6 +125,8 @@ bun run harness
 # open http://localhost:5490/harness/index.html?list=proto&scenario=scrollup&mix=real&size=1000
 ```
 
+`list=proto` is ballast's arm key in the harness, kept from its working name so the commands in `docs/RESULTS.md` still reproduce.
+
 The harness is a Vite dev server (port 5490, cross-origin-isolated so the memory scenario can call `measureUserAgentSpecificMemory`). All benchmark deps resolve locally through Vite's pre-bundling — after install, runs make zero network requests (esm.sh cold-fetch races produced ghost runs before this; see `docs/RESULTS.md`). The page still imports `src/index.mjs` directly, so the receipts always describe the shipped code.
 
 Bench runners need a Chrome with `--remote-debugging-port=9222` (frame-accurate measurement does not work in embedded panes). For WebKit and phones there is no CDP: drive desktop Safari through `safaridriver --mcp`, and read the on-device probes (`?probe=1`, `?blank=1`, `?release=1`) off the page itself — § 10 of `docs/RESULTS.md` is the standing warning that an instrument validated on the bench is validated in the one environment guaranteed not to contain what it is meant to catch.
@@ -135,4 +137,4 @@ node bench/bench.mjs "http://localhost:5490/harness/index.html?list=proto&scenar
 
 ## Provenance
 
-The spacer/anchor vocabulary follows publicly observable behavior of Claude Desktop's and ChatGPT's transcript renderers (DOM structure and runtime behavior); all code here is written from scratch. LegendList, TanStack Virtual, virtua, and react-virtuoso were used as benchmark subjects via their public npm packages; virtua's e2e methodology informed the gesture-testing approach (MIT).
+The spacer/anchor vocabulary is informed by studying the shipped, minified bundles of Claude Desktop's and ChatGPT's transcript renderers, read to understand the design rather than copied; all code here is written from scratch. LegendList, TanStack Virtual, virtua, and react-virtuoso were used as benchmark subjects via their public npm packages (Virtuoso Message List under its evaluation license, which expressly permits performance benchmarking); virtua's e2e methodology informed the gesture-testing approach (MIT).
