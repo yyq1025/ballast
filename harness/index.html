@@ -338,6 +338,166 @@ if (params.get('probe') === '1') {
     }
   }, 300)
 }
+// ?touch=1 — on-device readout for "the list fights my finger" (the class
+// legend-list#488 reports on iOS Safari). Per gesture, touchstart through the
+// first ~300ms of scroll silence after touchend: how many times JS wrote
+// scrollTop while the finger was down and how far, how many sampled frames
+// moved AGAINST the finger, how much of the finger's travel the scroll
+// delivered, and what became of the fling (travel, duration, JS writes into
+// it — a write during momentum is what kills it on WebKit). No row identity
+// anywhere, so it reads the same on every arm; ?release=1 adds the painted
+// shift where rows carry data-pkey. Finger down the screen = scrollTop down.
+if (params.get('touch') === '1') {
+  const o = document.createElement('div')
+  o.style.cssText =
+    'position:fixed;left:4px;bottom:4px;z-index:99999;background:rgba(0,0,0,.88);' +
+    'color:#7fdc7f;font:10px/1.45 monospace;padding:6px 8px;border-radius:6px;' +
+    'pointer-events:none;max-width:94vw;white-space:pre-wrap'
+  document.body.appendChild(o)
+  const log = []
+  window.__touchLog = log
+  const paint = (live) =>
+    (o.textContent =
+      `TOUCH PROBE  arm=${params.get('list') || 'tanstack'}\n` +
+      (live ? `${live}\n` : '') +
+      (log.length ? log.join('\n') : '  drag slowly, then let go'))
+  paint()
+  const find = () => {
+    let best = null
+    for (const d of document.querySelectorAll('div')) {
+      if (d.scrollHeight > d.clientHeight + 10) {
+        const oy = getComputedStyle(d).overflowY
+        if ((oy === 'auto' || oy === 'scroll') && (!best || d.scrollHeight > best.scrollHeight)) best = d
+      }
+    }
+    return best
+  }
+  let g = null
+  const desc = Object.getOwnPropertyDescriptor(Element.prototype, 'scrollTop')
+  const topFrame = () => {
+    const ls = (new Error().stack || '').split('\n').map((s) => s.trim()).filter(Boolean)
+    // Drop the probe's own frames whatever the engine's stack format.
+    const own = /^(Error|at )?(rec|set|get|topFrame|Element\.prototype\.scroll(To|By))\b|@|\bset\b.*scrollTop/i
+    const rest = ls.filter((s, i) => !(i < 4 && own.test(s) && !/LegendList|Virtualizer|virtua|proto|legend|tanstack/i.test(s)))
+    return (rest[0] || ls[3] || '?').replace(/^at\s+/, '').slice(0, 44)
+  }
+  // A scripted driver (the desktop scrollTop walk) flags its own writes with
+  // window.__touchDriver so only the LIBRARY's writes are counted.
+  const rec = (el, dv) => {
+    if (!g || el !== g.sc || Math.abs(dv) < 0.5 || window.__touchDriver) return
+    const b = g.phase === 'down' ? g.down : g.fling
+    b.writes++
+    b.px += Math.abs(dv)
+    const f = topFrame()
+    b.frames[f] = (b.frames[f] || 0) + 1
+  }
+  Object.defineProperty(Element.prototype, 'scrollTop', {
+    get() { return desc.get.call(this) },
+    set(v) { rec(this, v - desc.get.call(this)); desc.set.call(this, v) },
+    configurable: true,
+  })
+  for (const name of ['scrollTo', 'scrollBy']) {
+    const orig = Element.prototype[name]
+    Element.prototype[name] = function (...a) {
+      const before = desc.get.call(this)
+      const r = orig.apply(this, a)
+      rec(this, desc.get.call(this) - before)
+      return r
+    }
+  }
+  const topWriter = (b) => {
+    const e = Object.entries(b.frames).sort((x, y) => y[1] - x[1])[0]
+    return e ? `  top: ${e[0]} ×${e[1]}` : ''
+  }
+  let n = 0
+  let fingerY = null
+  let fingerAcc = 0 // signed finger travel since the last sampled frame
+  addEventListener('touchstart', (e) => {
+    if (g && g.phase === 'down') return
+    const sc = find()
+    if (!sc) return
+    fingerY = e.touches?.[0]?.clientY ?? 0
+    fingerAcc = 0
+    const st0 = desc.get.call(sc)
+    g = {
+      sc, phase: 'down', st0, lastST: st0, fingerTravel: 0, frames: 0, against: 0, againstPx: 0,
+      target: e.target, lastMove: performance.now(), still: 0,
+      down: { writes: 0, px: 0, frames: {} }, fling: { writes: 0, px: 0, frames: {} },
+    }
+    const tick = () => {
+      if (!g || g.phase !== 'down') return
+      const st = desc.get.call(g.sc)
+      const d = st - g.lastST
+      g.frames++
+      // touchend is dispatched to the touchstart TARGET; a virtualizer that
+      // unmounts that row mid-fling leaves the event on a detached node, where
+      // it never reaches window. Infer the end instead: no touchmove for 400ms
+      // and the scroll still for 18 frames. (A finger held motionless that long
+      // splits into two gestures — acceptable for a probe.) The line says so,
+      // and whether the target was still in the DOM, so the loss is visible.
+      g.still = Math.abs(d) < 1 ? g.still + 1 : 0
+      if (performance.now() - g.lastMove > 400 && g.still >= 18) {
+        g.orphan = true
+        end({ touches: [] })
+        return
+      }
+      // The finger moving DOWN the screen (clientY up) must take scrollTop DOWN:
+      // same sign on the two deltas means the list moved against the hand.
+      if (Math.abs(fingerAcc) > 0.5 && Math.abs(d) >= 1 && d * fingerAcc > 0) {
+        g.against++
+        g.againstPx += Math.abs(d)
+      }
+      g.lastST = st
+      fingerAcc = 0
+      paint(`  #${n + 1} finger ${Math.round(Math.abs(g.fingerTravel))}px → scroll ${Math.round(Math.abs(st - g.st0))}px, JS writes ${g.down.writes}`)
+      requestAnimationFrame(tick)
+    }
+    requestAnimationFrame(tick)
+  }, { passive: true, capture: true })
+  addEventListener('touchmove', (e) => {
+    if (!g || g.phase !== 'down') return
+    const y = e.touches?.[0]?.clientY ?? fingerY
+    const dy = y - fingerY
+    fingerY = y
+    fingerAcc += dy
+    g.fingerTravel += dy
+    g.lastMove = performance.now()
+  }, { passive: true, capture: true })
+  const end = (e) => {
+    if (!g || g.phase !== 'down' || (e.touches && e.touches.length)) return
+    g.phase = 'fling'
+    const sc = g.sc
+    const stDownEnd = desc.get.call(sc)
+    const tEnd = performance.now()
+    const finger = Math.round(Math.abs(g.fingerTravel))
+    const scroll = Math.round(Math.abs(stDownEnd - g.st0))
+    const pct = finger ? Math.round((scroll / finger) * 100) : 0
+    const me = g
+    let still = 0, last = stDownEnd, k = 0
+    const tick = () => {
+      const st = desc.get.call(sc)
+      still = Math.abs(st - last) < 1 ? still + 1 : 0
+      last = st
+      if (still < 18 && ++k < 900) { requestAnimationFrame(tick); return }
+      const fl = Math.round(Math.abs(st - stDownEnd))
+      const ms = Math.round(performance.now() - tEnd - 300)
+      n++
+      const orphan = me.orphan
+        ? `\n   touchend LOST, end inferred; touchstart target ${me.target && me.target.isConnected ? 'still' : 'NOT'} in DOM`
+        : ''
+      log.unshift(
+        `#${n} down: finger ${finger}px → scroll ${scroll}px (${pct}%) | ${me.frames}f, ${me.against} against (${Math.round(me.againstPx)}px) | JS ${me.down.writes}w ${Math.round(me.down.px)}px${topWriter(me.down)}\n` +
+        `   fling: ${fl}px in ${Math.max(ms, 0)}ms | JS ${me.fling.writes}w ${Math.round(me.fling.px)}px${topWriter(me.fling)}${orphan}`,
+      )
+      if (log.length > 4) log.pop()
+      if (g === me) g = null
+      paint()
+    }
+    requestAnimationFrame(tick)
+  }
+  addEventListener('touchend', end, { passive: true, capture: true })
+  addEventListener('touchcancel', end, { passive: true, capture: true })
+}
 const RV_VER = params.get('rv') || '3.14.10'
 const RATE = Number(params.get('rate') || 35)
 const USE_TRANSITION = params.get('transition') === '1'

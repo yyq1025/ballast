@@ -124,7 +124,7 @@ Architectural note: ChatGPT can use absolute distance for *both* transitions bec
 
 ## 5. Ecosystem measurement notes
 
-- LegendList web ships **no real-browser tests** (jsdom + mocked geometry only) — the artifact classes measured here are structurally invisible to its CI. Its quality is design-carried, and holds: 0% on every gesture metric.
+- LegendList web ships **no real-browser tests** (jsdom + mocked geometry only) — the artifact classes measured here are structurally invisible to its CI. Its quality is design-carried, and holds under Blink's CDP drags: 0% on every gesture metric there. Under WebKit *touch* it does not — § 12.
 - All four web libraries (TanStack, LegendList, virtua, react-virtuoso) are RO-timing-class; none measures synchronously in the commit. virtuoso is a hybrid (container-RO trigger + offsetHeight batch harvest, with an optional rAF deferral path).
 - virtua ships no built-in follow/landing (position-stability primitives only); its official chat pattern is prompt-pinning with a viewport-height blank reserve, and its e2e suite (Playwright, real WebKit, touch/momentum emulation, per-browser tolerances) is the strongest testing reference in the space.
 
@@ -849,3 +849,107 @@ is worse than no probe.
 
 So the harness owes a fast-mounting, uniform-row corpus before this class is
 guarded in-repo.
+
+## 12. 2026-09-01: the competitors under a finger — WebKit touch, three arms
+
+Every gesture number for LegendList and TanStack above came from Blink CDP
+drags, and the README's "0% on every gesture metric" for LegendList was a Blink
+statement. [legend-list#488](https://github.com/LegendApp/legend-list/issues/488)
+(2026-07-06, open, no comments) reports the opposite on iOS Safari: "stiff/janky
+scroll during touch drag … fights the finger mid-gesture" — the § 7 class. The
+Blink zero was consistent with that rather than contradicting it: during an
+active CDP drag Blink stomps JS `scrollTop` writes, so a viewport-space metric
+reads clean whether or not the library wrote. What had never been counted was
+**the writes themselves**.
+
+### Instrument: `?touch=1`
+
+Arm-agnostic and row-identity-free (so it reads the same on every arm, unlike
+`?release=1`, which needs `data-pkey`). Shadows the `scrollTop` setter plus
+`scrollTo`/`scrollBy`, and per gesture — `touchstart` through the first ~300ms of
+scroll silence after `touchend` — reports: library `scrollTop` writes while the
+finger is down (count, px, top stack frame), sampled frames where the scroll
+moved in the same direction as the finger's own movement (i.e. *against* the
+hand; finger down the screen must take `scrollTop` down), finger travel vs
+scroll travel, and the fling after release (travel, duration, writes into it).
+A scripted driver flags its own writes with `window.__touchDriver` so only the
+library's are counted. Two counters agreed on every desktop arm below: the
+driver's "position deviated from the command" and the probe's "JS wrote
+`scrollTop`" gave the same count and the same px.
+
+### Desktop WebKit — the write count
+
+Safari Technology Preview (Version/27.0, WebKit 605.1.15) over `safaridriver
+--mcp`, viewport 430×900, `mix=real size=1000 scenario=rest`. Driver: a
+`scrollTop` walk of −8px/frame × 600 frames (4800px commanded) from the bottom
+into cold history, framed by synthetic `touchstart`/`touchmove`/`touchend`.
+Desktop Safari has no `TouchEvent` constructor, so these are plain `Event`s of
+the touch type names — enough to arm a gate that listens by name (ballast's
+did), irrelevant to a library that has no touch path (LegendList).
+
+| arm | library writes during the gesture | px written | max single write | travelled of 4800 | writer |
+|---|---|---|---|---|---|
+| ballast ro | **0** | 0 | 0 | **4800** (100%) | — (one `flushGesture` write of 1115px *after* `touchend`; `scrollHeight` −1115 in the same step) |
+| LegendList web 3.3.7 | 43 | 2913 | 259 | 4895 (102%) | `scrollAdjustBy` ×43 |
+| TanStack react-virtual 3.14.10 | 37 | 2010 | 307 | 2790 (58%) | `scrollWithAdjustments` ×37 |
+
+Two different shapes. LegendList's writes are bidirectional (−94, −47 ×many,
++81, +105) and net to ~0 over the walk: mvcp anchoring keeping the *content*
+stable as rows above measure in — correct in the position sense, and exactly the
+churn class of § 2, because every one of them is a `scrollTop` write under a
+gesture. TanStack's are all positive (+129, +153 …): with the desktop UA its
+iOS-gated deferral is inactive, so every above-viewport compensation lands live
+and opposes the upward walk — 2010px of the 4800 commanded never arrive. Read
+that row as § 7 does, "each arm on the input it handles"; the iOS behaviour is in
+the next table.
+
+### iOS Simulator — what the engine does with the writes
+
+iPhone 16 Pro, iOS 26.5, Safari, same URL parameters. Real touch through the
+simulator's input layer: slow drags as an 11-point `touch_path` (60pt steps at
+350ms, ~170pt/s, finger down the screen = scroll-up into history), flick as a
+500pt swipe in 0.12s. `touch_path` releases without velocity, so every slow
+drag's fling reads 0 on every arm; momentum comes only from the swipe.
+
+| arm | slow drag: writes while down | slow drag: frames against the finger | flick: fling after release | write at release |
+|---|---|---|---|---|
+| ballast ro | **0, 0, 0** | **0, 0, 0** | **1632px in 3029ms** | 1 `flushGesture` (213px; picture ±1px, § 9) |
+| LegendList web | 0 (still inside measured rows), 4, 3 | 0, **1 (410px)**, 1 (34px) | **168px, dead in <300ms** (7 writes, 508px, during the 10 down-frames) | — |
+| TanStack | 0, 0 (iOS gate active) | 0, 0 | 1045px in 3000ms | 1 ledger replay, 370px (`scrollWithAdjustments`) |
+
+So the desktop count becomes, on the engine that cares: for LegendList, one
+frame per slow drag where the content moves *against* the finger — 410px in the
+worst of three — and a flick whose momentum is gone at 168px, against 1632px on
+the write-gated arm on the same device. This is #488, quantified, and the
+mechanism is the one § 7 named: nothing in `@legendapp/list`'s web path gates
+writes on touch. TanStack's iOS deferral does gate them (0 writes under the
+finger, momentum intact), and pays at release with the ledger replay — 370px
+here, 3,675px on the real iPhone in § 7.
+
+### Two observations that are not results
+
+1. **A lost `touchend`.** On the first TanStack flick, run after two slow drags
+   deeper into history, neither the probe nor TanStack saw the release: the
+   probe's gesture stayed "down" for 4737 frames until the next tap's `touchend`
+   closed it, and TanStack's deferred ledger — 0 writes the whole time — was then
+   replayed as a single **1,932px** write at *that* `touchend`. Touch events are
+   dispatched to the `touchstart` target; a virtualizer that unmounts that row
+   mid-fling leaves the event on a detached node, where it reaches neither
+   `window` nor the scroll element's own listeners. LegendList recycles its rows
+   (`recycleItems`, nodes persist) and its `touchend` arrived every time. This
+   fits, and would make the iPhone's 3,675px a second-gesture replay rather than
+   a first-gesture one — but it happened once and a fresh flick from the bottom
+   did not reproduce it. The probe now infers an end (no `touchmove` for 400ms
+   and 18 still frames) and prints whether the `touchstart` target is still in
+   the DOM, so the next occurrence will say.
+2. **`scrollTop`, not paint.** This probe counts writes and scroll movement; the
+   picture is § 9's business (`?release=1`, `data-pkey` rows only). ballast's
+   213px release write and TanStack's 370px replay are both single post-gesture
+   writes in this table; that ballast's moves the picture ±1px and TanStack's
+   moves it by the full amount is the § 7/§ 9 measurement, not this one.
+
+Methodology debts, for the record: the first slow drag on the TanStack arm was
+lost to page load (the gesture landed before the probe armed) and is not in the
+table; n = 3 slow drags and 1 flick per arm, one device; and `?release=1` was
+not run on the LegendList arm because its rows carry no `data-pkey`, so its
+painted release shift remains unmeasured.
